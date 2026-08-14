@@ -1,5 +1,6 @@
 mod builtins;
 mod executor;
+mod parser;
 mod prompt;
 mod shell;
 
@@ -27,16 +28,21 @@ fn main() {
             continue;
         }
 
-        let mut parts = input.split_whitespace();
+        let parsed = match parser::parse(input) {
+            Ok(parsed) => parsed,
 
-        let Some(command) = parts.next() else {
-            continue;
+            Err(err) => {
+                eprintln!("crbsh: parse error: {err:?}");
+                shell.exit_code = 2;
+                continue;
+            }
         };
 
-        let args: Vec<String> = parts.map(String::from).collect();
+        let command = &parsed.name;
+        let args = &parsed.args;
 
         if let Some(builtin) = shell.builtins.get(command) {
-            match builtin(&mut shell, &args) {
+            match builtin(&mut shell, args) {
                 Ok(BuiltinOutcome::Continue) => {
                     shell.exit_code = 0;
                 }
@@ -54,7 +60,7 @@ fn main() {
             continue;
         }
 
-        match executor::execute_external(command, &args) {
+        match executor::execute_external(command, args) {
             Ok(code) => {
                 shell.exit_code = code;
             }
