@@ -1,4 +1,4 @@
-use std::env;
+mod builtins;
 use std::io::{self, Write};
 use std::process::Command;
 
@@ -25,19 +25,17 @@ fn main() {
 
         match command {
             "exit" => {
-                break;
-            }
-
-            "cd" => {
-                let target = args.first().copied().unwrap_or("/");
-
-                if let Err(err) = env::set_current_dir(target) {
-                    eprintln!("crbsh: cd: {err}");
+                if builtins::exit::run() {
+                    break;
                 }
             }
 
+            "cd" => {
+                builtins::cd::run(&args);
+            }
+
             "print" => {
-                println!("{}", args.join(" "));
+                builtins::print::run(&args);
             }
 
             _ => match Command::new(command).args(args).status() {
