@@ -36,6 +36,10 @@ fn main() {
                 }
             }
 
+            "print" => {
+                println!("{}", args.join(" "));
+            }
+
             _ => match Command::new(command).args(args).status() {
                 Ok(_) => {}
                 Err(err) => {
