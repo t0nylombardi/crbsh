@@ -3,6 +3,7 @@ mod executor;
 mod parser;
 mod prompt;
 mod shell;
+mod tokens;
 
 use std::io::{self, Write};
 
