@@ -1,10 +1,12 @@
 mod builtins;
+mod prompt;
+
 use std::io::{self, Write};
 use std::process::Command;
 
 fn main() {
     loop {
-        print!("crbsh> ");
+        print!("{}", prompt::render());
         io::stdout().flush().unwrap();
 
         let mut input = String::new();
