@@ -1,10 +1,16 @@
 mod builtins;
+mod executor;
 mod prompt;
+mod shell;
 
 use std::io::{self, Write};
-use std::process::Command;
+
+use builtins::BuiltinOutcome;
+use shell::Shell;
 
 fn main() {
+    let mut shell = Shell::new();
+
     loop {
         print!("{}", prompt::render());
         io::stdout().flush().unwrap();
@@ -22,30 +28,41 @@ fn main() {
         }
 
         let mut parts = input.split_whitespace();
-        let command = parts.next().unwrap();
-        let args: Vec<&str> = parts.collect();
 
-        match command {
-            "exit" => {
-                if builtins::exit::run() {
-                    break;
+        let Some(command) = parts.next() else {
+            continue;
+        };
+
+        let args: Vec<String> = parts.map(String::from).collect();
+
+        if let Some(builtin) = shell.builtins.get(command) {
+            match builtin(&mut shell, &args) {
+                Ok(BuiltinOutcome::Continue) => {
+                    shell.exit_code = 0;
                 }
-            }
 
-            "cd" => {
-                builtins::cd::run(&args);
-            }
+                Ok(BuiltinOutcome::Exit(code)) => {
+                    std::process::exit(code);
+                }
 
-            "print" => {
-                builtins::print::run(&args);
-            }
-
-            _ => match Command::new(command).args(args).status() {
-                Ok(_) => {}
                 Err(err) => {
-                    eprintln!("crbsh: {command}: {err}");
+                    eprintln!("crbsh: {}", err.message);
+                    shell.exit_code = 1;
                 }
-            },
+            }
+
+            continue;
+        }
+
+        match executor::execute_external(command, &args) {
+            Ok(code) => {
+                shell.exit_code = code;
+            }
+
+            Err(err) => {
+                eprintln!("crbsh: {command}: {err}");
+                shell.exit_code = 127;
+            }
         }
     }
 }

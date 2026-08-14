@@ -1,23 +1,17 @@
 use std::env;
 
-pub fn run(args: &[&str]) {
+use crate::shell::Shell;
+
+use super::{BuiltinError, BuiltinOutcome, BuiltinResult};
+
+pub fn run(_shell: &mut Shell, args: &[String]) -> BuiltinResult {
     let target = match args.first() {
-        Some(path) => *path,
-        None => match env::var("HOME") {
-            Ok(home) => {
-                if let Err(err) = env::set_current_dir(home) {
-                    eprintln!("crbsh: cd: {err}");
-                }
-                return;
-            }
-            Err(_) => {
-                eprintln!("crbsh: cd: HOME is not set");
-                return;
-            }
-        },
+        Some(path) => path.clone(),
+        None => env::var("HOME").map_err(|_| BuiltinError::new("HOME is not set"))?,
     };
 
-    if let Err(err) = env::set_current_dir(target) {
-        eprintln!("crbsh: cd: {target}: {err}");
-    }
+    env::set_current_dir(&target)
+        .map_err(|err| BuiltinError::new(format!("cd: {target}: {err}")))?;
+
+    Ok(BuiltinOutcome::Continue)
 }
