@@ -1,2 +1,8 @@
-/target
+debug/
+target/
+Cargo.lock
+**/*.rs.bk
+*.pdb
+
 code_output.txt
+AGENTS.md
