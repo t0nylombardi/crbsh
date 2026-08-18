@@ -29,8 +29,8 @@ fn main() {
             continue;
         }
 
-        let parsed = match parser::parse(input) {
-            Ok(parsed) => parsed,
+        let pipeline = match parser::parse(input) {
+            Ok(pipeline) => pipeline,
 
             Err(err) => {
                 eprintln!("crbsh: parse error: {err:?}");
@@ -39,10 +39,20 @@ fn main() {
             }
         };
 
+        let parsed = match pipeline.commands.first() {
+            Some(command) => command,
+            None => {
+                shell.exit_code = 0;
+                continue;
+            }
+        };
+
         let command = &parsed.name;
         let args = &parsed.args;
 
-        if let Some(builtin) = shell.builtins.get(command) {
+        if pipeline.commands.len() == 1
+            && let Some(builtin) = shell.builtins.get(command)
+        {
             match builtin(&mut shell, args) {
                 Ok(BuiltinOutcome::Continue) => {
                     shell.exit_code = 0;
@@ -61,13 +71,13 @@ fn main() {
             continue;
         }
 
-        match executor::execute_external(command, args) {
+        match executor::execute_pipeline(&pipeline) {
             Ok(code) => {
                 shell.exit_code = code;
             }
 
             Err(err) => {
-                eprintln!("crbsh: {command}: {err}");
+                eprintln!("crbsh: {}: {}", err.command, err.source);
                 shell.exit_code = 127;
             }
         }
