@@ -5,7 +5,15 @@ pub enum Token {
     IntLiteral(i64),
     BoolLiteral(bool),
     Assign,
+    Equal,
+    NotEqual,
     Colon,
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    LessEqual,
+    GreaterEqual,
     Pipe,
     RedirectOut,
     RedirectAppend,
@@ -64,6 +72,9 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, TokenizeError> {
                 if matches!(chars.peek(), Some('>')) {
                     chars.next();
                     tokens.push(Token::RedirectAppend);
+                } else if matches!(chars.peek(), Some('=')) {
+                    chars.next();
+                    tokens.push(Token::GreaterEqual);
                 } else {
                     tokens.push(Token::RedirectOut);
                 }
@@ -71,7 +82,13 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, TokenizeError> {
 
             '<' if !in_single_quotes && !in_double_quotes => {
                 push_word(&mut tokens, &mut current, &mut quoted);
-                tokens.push(Token::RedirectIn);
+
+                if matches!(chars.peek(), Some('=')) {
+                    chars.next();
+                    tokens.push(Token::LessEqual);
+                } else {
+                    tokens.push(Token::RedirectIn);
+                }
             }
 
             '&' if !in_single_quotes && !in_double_quotes => {
@@ -81,12 +98,56 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, TokenizeError> {
 
             '=' if !in_single_quotes && !in_double_quotes => {
                 push_word(&mut tokens, &mut current, &mut quoted);
-                tokens.push(Token::Assign);
+
+                if matches!(chars.peek(), Some('=')) {
+                    chars.next();
+                    tokens.push(Token::Equal);
+                } else {
+                    tokens.push(Token::Assign);
+                }
+            }
+
+            '!' if !in_single_quotes && !in_double_quotes && matches!(chars.peek(), Some('=')) => {
+                push_word(&mut tokens, &mut current, &mut quoted);
+                chars.next();
+                tokens.push(Token::NotEqual);
             }
 
             ':' if !in_single_quotes && !in_double_quotes => {
                 push_word(&mut tokens, &mut current, &mut quoted);
                 tokens.push(Token::Colon);
+            }
+
+            '+' if !in_single_quotes
+                && !in_double_quotes
+                && current.is_empty()
+                && is_separated_operator(chars.peek()) =>
+            {
+                tokens.push(Token::Plus);
+            }
+
+            '-' if !in_single_quotes
+                && !in_double_quotes
+                && current.is_empty()
+                && is_separated_operator(chars.peek()) =>
+            {
+                tokens.push(Token::Minus);
+            }
+
+            '*' if !in_single_quotes
+                && !in_double_quotes
+                && current.is_empty()
+                && is_separated_operator(chars.peek()) =>
+            {
+                tokens.push(Token::Star);
+            }
+
+            '/' if !in_single_quotes
+                && !in_double_quotes
+                && current.is_empty()
+                && is_separated_operator(chars.peek()) =>
+            {
+                tokens.push(Token::Slash);
             }
 
             ch if ch.is_whitespace() && !in_single_quotes && !in_double_quotes => {
@@ -139,6 +200,10 @@ fn classify_word(value: String) -> Token {
             .map(Token::IntLiteral)
             .unwrap_or(Token::Word(value)),
     }
+}
+
+fn is_separated_operator(next: Option<&char>) -> bool {
+    next.is_none_or(|ch| ch.is_whitespace())
 }
 
 #[cfg(test)]
@@ -279,6 +344,37 @@ mod tests {
                 Token::BoolLiteral(true),
                 Token::StringLiteral("true".into()),
             ]
+        );
+    }
+
+    #[test]
+    fn tokenizes_expression_operators() {
+        let tokens = tokenize("let ready = retries + 1 <= 5 == true").unwrap();
+
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Word("let".into()),
+                Token::Word("ready".into()),
+                Token::Assign,
+                Token::Word("retries".into()),
+                Token::Plus,
+                Token::IntLiteral(1),
+                Token::LessEqual,
+                Token::IntLiteral(5),
+                Token::Equal,
+                Token::BoolLiteral(true),
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_unix_flags_as_words() {
+        let tokens = tokenize("ls -la").unwrap();
+
+        assert_eq!(
+            tokens,
+            vec![Token::Word("ls".into()), Token::Word("-la".into())]
         );
     }
 

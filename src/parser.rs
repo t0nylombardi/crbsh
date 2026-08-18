@@ -14,6 +14,11 @@ pub enum Expression {
     Identifier(String),
     EnvironmentVariable(String),
     Status,
+    Binary {
+        left: Box<Expression>,
+        operator: BinaryOperator,
+        right: Box<Expression>,
+    },
 }
 
 impl From<&str> for Expression {
@@ -25,6 +30,37 @@ impl From<&str> for Expression {
 impl From<Value> for Expression {
     fn from(value: Value) -> Self {
         Self::Literal(value)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinaryOperator {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Equal,
+    NotEqual,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
+}
+
+impl BinaryOperator {
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Self::Add => "+",
+            Self::Subtract => "-",
+            Self::Multiply => "*",
+            Self::Divide => "/",
+            Self::Equal => "==",
+            Self::NotEqual => "!=",
+            Self::Less => "<",
+            Self::LessEqual => "<=",
+            Self::Greater => ">",
+            Self::GreaterEqual => ">=",
+        }
     }
 }
 
@@ -180,27 +216,30 @@ fn parse_environment_assignment(name: &str, rest: &[Token]) -> Result<ParsedInpu
 }
 
 fn parse_assignment_tail(tokens: &[Token]) -> Result<Expression, ParseError> {
-    if matches!(tokens, [Token::Assign]) {
-        return Err(ParseError::MissingAssignmentValue);
-    }
-
-    let [Token::Assign, value] = tokens else {
+    let [Token::Assign, rest @ ..] = tokens else {
         return Err(ParseError::ExpectedAssignmentOperator);
     };
 
-    token_to_expression(value).ok_or_else(|| ParseError::UnexpectedToken(value.clone()))
+    parse_expression(rest)
 }
 
 fn parse_assignment_value(tokens: &[Token]) -> Result<Expression, ParseError> {
-    let [value] = tokens else {
-        if tokens.is_empty() {
-            return Err(ParseError::MissingAssignmentValue);
-        }
+    parse_expression(tokens)
+}
 
-        return Err(ParseError::ExpectedAssignmentOperator);
-    };
+fn parse_expression(tokens: &[Token]) -> Result<Expression, ParseError> {
+    if tokens.is_empty() {
+        return Err(ParseError::MissingAssignmentValue);
+    }
 
-    token_to_expression(value).ok_or_else(|| ParseError::UnexpectedToken(value.clone()))
+    let mut parser = ExpressionParser::new(tokens);
+    let expression = parser.parse_equality()?;
+
+    if let Some(token) = parser.peek() {
+        return Err(ParseError::UnexpectedToken(token.clone()));
+    }
+
+    Ok(expression)
 }
 
 fn parse_pipeline(tokens: Vec<Token>) -> Result<Pipeline, ParseError> {
@@ -229,10 +268,20 @@ fn parse_pipeline(tokens: Vec<Token>) -> Result<Pipeline, ParseError> {
             Token::Word(_)
             | Token::StringLiteral(_)
             | Token::IntLiteral(_)
-            | Token::BoolLiteral(_) => {
+            | Token::BoolLiteral(_)
+            | Token::Assign
+            | Token::Equal
+            | Token::NotEqual
+            | Token::Colon
+            | Token::Plus
+            | Token::Minus
+            | Token::Star
+            | Token::Slash
+            | Token::LessEqual
+            | Token::GreaterEqual => {
                 if current.is_none() {
                     let name = token_to_command_name(&token)
-                        .expect("word and literal tokens map to command names");
+                        .expect("word, literal, and operator tokens map to command names");
                     current = Some(ParsedCommand {
                         name,
                         args: Vec::new(),
@@ -241,8 +290,8 @@ fn parse_pipeline(tokens: Vec<Token>) -> Result<Pipeline, ParseError> {
                     continue;
                 }
 
-                let expression = token_to_expression(&token)
-                    .expect("word and literal tokens map to expressions");
+                let expression = token_to_command_argument(&token)
+                    .expect("word, literal, and operator tokens map to command arguments");
 
                 match &mut current {
                     Some(command) => command.args.push(expression),
@@ -298,6 +347,162 @@ fn parse_pipeline(tokens: Vec<Token>) -> Result<Pipeline, ParseError> {
 enum RedirectionKind {
     Stdin,
     Stdout { append: bool },
+}
+
+struct ExpressionParser<'a> {
+    tokens: &'a [Token],
+    position: usize,
+}
+
+impl<'a> ExpressionParser<'a> {
+    fn new(tokens: &'a [Token]) -> Self {
+        Self {
+            tokens,
+            position: 0,
+        }
+    }
+
+    fn parse_equality(&mut self) -> Result<Expression, ParseError> {
+        let mut expression = self.parse_comparison()?;
+
+        while let Some(operator) = self.match_equality_operator() {
+            let right = self.parse_comparison()?;
+            expression = Expression::Binary {
+                left: Box::new(expression),
+                operator,
+                right: Box::new(right),
+            };
+        }
+
+        Ok(expression)
+    }
+
+    fn parse_comparison(&mut self) -> Result<Expression, ParseError> {
+        let mut expression = self.parse_term()?;
+
+        while let Some(operator) = self.match_comparison_operator() {
+            let right = self.parse_term()?;
+            expression = Expression::Binary {
+                left: Box::new(expression),
+                operator,
+                right: Box::new(right),
+            };
+        }
+
+        Ok(expression)
+    }
+
+    fn parse_term(&mut self) -> Result<Expression, ParseError> {
+        let mut expression = self.parse_factor()?;
+
+        while let Some(operator) = self.match_term_operator() {
+            let right = self.parse_factor()?;
+            expression = Expression::Binary {
+                left: Box::new(expression),
+                operator,
+                right: Box::new(right),
+            };
+        }
+
+        Ok(expression)
+    }
+
+    fn parse_factor(&mut self) -> Result<Expression, ParseError> {
+        let mut expression = self.parse_primary()?;
+
+        while let Some(operator) = self.match_factor_operator() {
+            let right = self.parse_primary()?;
+            expression = Expression::Binary {
+                left: Box::new(expression),
+                operator,
+                right: Box::new(right),
+            };
+        }
+
+        Ok(expression)
+    }
+
+    fn parse_primary(&mut self) -> Result<Expression, ParseError> {
+        let Some(token) = self.advance() else {
+            return Err(ParseError::MissingAssignmentValue);
+        };
+
+        token_to_expression(token).ok_or_else(|| ParseError::UnexpectedToken(token.clone()))
+    }
+
+    fn match_equality_operator(&mut self) -> Option<BinaryOperator> {
+        match self.peek() {
+            Some(Token::Equal) => {
+                self.position += 1;
+                Some(BinaryOperator::Equal)
+            }
+            Some(Token::NotEqual) => {
+                self.position += 1;
+                Some(BinaryOperator::NotEqual)
+            }
+            _ => None,
+        }
+    }
+
+    fn match_comparison_operator(&mut self) -> Option<BinaryOperator> {
+        match self.peek() {
+            Some(Token::RedirectIn) => {
+                self.position += 1;
+                Some(BinaryOperator::Less)
+            }
+            Some(Token::LessEqual) => {
+                self.position += 1;
+                Some(BinaryOperator::LessEqual)
+            }
+            Some(Token::RedirectOut) => {
+                self.position += 1;
+                Some(BinaryOperator::Greater)
+            }
+            Some(Token::GreaterEqual) => {
+                self.position += 1;
+                Some(BinaryOperator::GreaterEqual)
+            }
+            _ => None,
+        }
+    }
+
+    fn match_term_operator(&mut self) -> Option<BinaryOperator> {
+        match self.peek() {
+            Some(Token::Plus) => {
+                self.position += 1;
+                Some(BinaryOperator::Add)
+            }
+            Some(Token::Minus) => {
+                self.position += 1;
+                Some(BinaryOperator::Subtract)
+            }
+            _ => None,
+        }
+    }
+
+    fn match_factor_operator(&mut self) -> Option<BinaryOperator> {
+        match self.peek() {
+            Some(Token::Star) => {
+                self.position += 1;
+                Some(BinaryOperator::Multiply)
+            }
+            Some(Token::Slash) => {
+                self.position += 1;
+                Some(BinaryOperator::Divide)
+            }
+            _ => None,
+        }
+    }
+
+    fn peek(&self) -> Option<&'a Token> {
+        self.tokens.get(self.position)
+    }
+
+    fn advance(&mut self) -> Option<&'a Token> {
+        let token = self.peek()?;
+        self.position += 1;
+        Some(token)
+    }
 }
 
 fn ensure_current_command(current: &Option<ParsedCommand>, token: Token) -> Result<(), ParseError> {
@@ -370,6 +575,29 @@ fn token_to_command_name(token: &Token) -> Option<String> {
         Token::Word(value) | Token::StringLiteral(value) => Some(value.clone()),
         Token::IntLiteral(value) => Some(value.to_string()),
         Token::BoolLiteral(value) => Some(value.to_string()),
+        token => token_to_operator_string(token).map(String::from),
+    }
+}
+
+fn token_to_command_argument(token: &Token) -> Option<Expression> {
+    token_to_expression(token).or_else(|| {
+        token_to_operator_string(token)
+            .map(|value| Expression::Literal(Value::String(value.into())))
+    })
+}
+
+fn token_to_operator_string(token: &Token) -> Option<&'static str> {
+    match token {
+        Token::Assign => Some("="),
+        Token::Equal => Some("=="),
+        Token::NotEqual => Some("!="),
+        Token::Colon => Some(":"),
+        Token::Plus => Some("+"),
+        Token::Minus => Some("-"),
+        Token::Star => Some("*"),
+        Token::Slash => Some("/"),
+        Token::LessEqual => Some("<="),
+        Token::GreaterEqual => Some(">="),
         _ => None,
     }
 }
@@ -607,6 +835,82 @@ fn parses_native_reassignment() {
         Ok(ParsedInput::Assignment {
             name: "retries".into(),
             value: Value::Int(5).into(),
+        })
+    );
+}
+
+#[test]
+fn parses_addition_expression() {
+    let result = parse("let next = retries + 1");
+
+    assert_eq!(
+        result,
+        Ok(ParsedInput::Let {
+            name: "next".into(),
+            type_annotation: None,
+            value: Expression::Binary {
+                left: Box::new(Expression::Identifier("retries".into())),
+                operator: BinaryOperator::Add,
+                right: Box::new(Value::Int(1).into()),
+            },
+        })
+    );
+}
+
+#[test]
+fn parses_comparison_expression() {
+    let result = parse("let active = retries < 5");
+
+    assert_eq!(
+        result,
+        Ok(ParsedInput::Let {
+            name: "active".into(),
+            type_annotation: None,
+            value: Expression::Binary {
+                left: Box::new(Expression::Identifier("retries".into())),
+                operator: BinaryOperator::Less,
+                right: Box::new(Value::Int(5).into()),
+            },
+        })
+    );
+}
+
+#[test]
+fn parses_equality_expression() {
+    let result = parse("let ready = active == true");
+
+    assert_eq!(
+        result,
+        Ok(ParsedInput::Let {
+            name: "ready".into(),
+            type_annotation: None,
+            value: Expression::Binary {
+                left: Box::new(Expression::Identifier("active".into())),
+                operator: BinaryOperator::Equal,
+                right: Box::new(Value::Bool(true).into()),
+            },
+        })
+    );
+}
+
+#[test]
+fn parses_arithmetic_precedence() {
+    let result = parse("let value = 2 + 3 * 4");
+
+    assert_eq!(
+        result,
+        Ok(ParsedInput::Let {
+            name: "value".into(),
+            type_annotation: None,
+            value: Expression::Binary {
+                left: Box::new(Value::Int(2).into()),
+                operator: BinaryOperator::Add,
+                right: Box::new(Expression::Binary {
+                    left: Box::new(Value::Int(3).into()),
+                    operator: BinaryOperator::Multiply,
+                    right: Box::new(Value::Int(4).into()),
+                }),
+            },
         })
     );
 }

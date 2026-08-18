@@ -2,16 +2,25 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::builtins::registry::BuiltinRegistry;
-use crate::parser::Expression;
+use crate::parser::{BinaryOperator, Expression};
 use crate::value::{TypeName, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShellError {
+    DivisionByZero,
     UndefinedVariable(String),
     UndefinedEnvironmentVariable(String),
+    UnsupportedOperator {
+        operator: BinaryOperator,
+        left: TypeName,
+        right: TypeName,
+    },
     VariableAlreadyDefined(String),
     VariableNotDefined(String),
-    TypeMismatch { expected: TypeName, found: TypeName },
+    TypeMismatch {
+        expected: TypeName,
+        found: TypeName,
+    },
 }
 
 pub struct Shell {
@@ -100,6 +109,16 @@ impl Shell {
                 .map(Value::String)
                 .ok_or_else(|| ShellError::UndefinedEnvironmentVariable(name.clone())),
             Expression::Status => Ok(Value::Int(i64::from(self.exit_code))),
+            Expression::Binary {
+                left,
+                operator,
+                right,
+            } => {
+                let left = self.evaluate(left)?;
+                let right = self.evaluate(right)?;
+
+                evaluate_binary(*operator, left, right)
+            }
         }
     }
 
@@ -140,10 +159,20 @@ impl Shell {
 impl fmt::Display for ShellError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::DivisionByZero => write!(formatter, "division by zero"),
             Self::UndefinedVariable(name) => write!(formatter, "undefined variable '{name}'"),
             Self::UndefinedEnvironmentVariable(name) => {
                 write!(formatter, "undefined environment variable '{name}'")
             }
+            Self::UnsupportedOperator {
+                operator,
+                left,
+                right,
+            } => write!(
+                formatter,
+                "unsupported operator {} for {left} and {right}",
+                operator.symbol()
+            ),
             Self::VariableAlreadyDefined(name) => {
                 write!(formatter, "variable '{name}' already defined")
             }
@@ -155,6 +184,49 @@ impl fmt::Display for ShellError {
                 )
             }
         }
+    }
+}
+
+fn evaluate_binary(
+    operator: BinaryOperator,
+    left: Value,
+    right: Value,
+) -> Result<Value, ShellError> {
+    match (operator, left, right) {
+        (BinaryOperator::Add, Value::Int(left), Value::Int(right)) => Ok(Value::Int(left + right)),
+        (BinaryOperator::Subtract, Value::Int(left), Value::Int(right)) => {
+            Ok(Value::Int(left - right))
+        }
+        (BinaryOperator::Multiply, Value::Int(left), Value::Int(right)) => {
+            Ok(Value::Int(left * right))
+        }
+        (BinaryOperator::Divide, Value::Int(_), Value::Int(0)) => Err(ShellError::DivisionByZero),
+        (BinaryOperator::Divide, Value::Int(left), Value::Int(right)) => {
+            Ok(Value::Int(left / right))
+        }
+        (BinaryOperator::Equal, left, right) if left.type_name() == right.type_name() => {
+            Ok(Value::Bool(left == right))
+        }
+        (BinaryOperator::NotEqual, left, right) if left.type_name() == right.type_name() => {
+            Ok(Value::Bool(left != right))
+        }
+        (BinaryOperator::Less, Value::Int(left), Value::Int(right)) => {
+            Ok(Value::Bool(left < right))
+        }
+        (BinaryOperator::LessEqual, Value::Int(left), Value::Int(right)) => {
+            Ok(Value::Bool(left <= right))
+        }
+        (BinaryOperator::Greater, Value::Int(left), Value::Int(right)) => {
+            Ok(Value::Bool(left > right))
+        }
+        (BinaryOperator::GreaterEqual, Value::Int(left), Value::Int(right)) => {
+            Ok(Value::Bool(left >= right))
+        }
+        (operator, left, right) => Err(ShellError::UnsupportedOperator {
+            operator,
+            left: left.type_name(),
+            right: right.type_name(),
+        }),
     }
 }
 
@@ -174,7 +246,7 @@ fn enforce_type(type_annotation: Option<TypeName>, value: &Value) -> Result<(), 
 
 #[cfg(test)]
 mod tests {
-    use crate::parser::Expression;
+    use crate::parser::{BinaryOperator, Expression};
     use crate::value::{TypeName, Value};
 
     use super::{Shell, ShellError};
@@ -338,5 +410,131 @@ mod tests {
             shell.assign_variable("retries", Value::Int(5)),
             Err(ShellError::VariableNotDefined("retries".into()))
         );
+    }
+
+    #[test]
+    fn evaluates_integer_arithmetic() {
+        let mut shell = Shell::new();
+
+        shell
+            .declare_variable("retries", None, Value::Int(3))
+            .unwrap();
+
+        assert_eq!(
+            shell.evaluate(&binary(
+                Expression::Identifier("retries".into()),
+                BinaryOperator::Add,
+                Value::Int(2).into(),
+            )),
+            Ok(Value::Int(5))
+        );
+        assert_eq!(
+            shell.evaluate(&binary(
+                Value::Int(6).into(),
+                BinaryOperator::Subtract,
+                Value::Int(4).into(),
+            )),
+            Ok(Value::Int(2))
+        );
+        assert_eq!(
+            shell.evaluate(&binary(
+                Value::Int(3).into(),
+                BinaryOperator::Multiply,
+                Value::Int(4).into(),
+            )),
+            Ok(Value::Int(12))
+        );
+        assert_eq!(
+            shell.evaluate(&binary(
+                Value::Int(8).into(),
+                BinaryOperator::Divide,
+                Value::Int(2).into(),
+            )),
+            Ok(Value::Int(4))
+        );
+    }
+
+    #[test]
+    fn evaluates_integer_comparisons() {
+        let shell = Shell::new();
+
+        assert_eq!(
+            shell.evaluate(&binary(
+                Value::Int(3).into(),
+                BinaryOperator::Less,
+                Value::Int(5).into(),
+            )),
+            Ok(Value::Bool(true))
+        );
+        assert_eq!(
+            shell.evaluate(&binary(
+                Value::Int(5).into(),
+                BinaryOperator::GreaterEqual,
+                Value::Int(5).into(),
+            )),
+            Ok(Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn evaluates_equality_for_matching_types() {
+        let shell = Shell::new();
+
+        assert_eq!(
+            shell.evaluate(&binary(
+                Value::Bool(true).into(),
+                BinaryOperator::Equal,
+                Value::Bool(true).into(),
+            )),
+            Ok(Value::Bool(true))
+        );
+        assert_eq!(
+            shell.evaluate(&binary(
+                Value::String("true".into()).into(),
+                BinaryOperator::NotEqual,
+                Value::String("false".into()).into(),
+            )),
+            Ok(Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn rejects_expression_type_mismatch() {
+        let shell = Shell::new();
+
+        assert_eq!(
+            shell.evaluate(&binary(
+                Value::String("3".into()).into(),
+                BinaryOperator::Add,
+                Value::Int(2).into(),
+            )),
+            Err(ShellError::UnsupportedOperator {
+                operator: BinaryOperator::Add,
+                left: TypeName::String,
+                right: TypeName::Int,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_division_by_zero() {
+        let shell = Shell::new();
+
+        assert_eq!(
+            shell.evaluate(&binary(
+                Value::Int(1).into(),
+                BinaryOperator::Divide,
+                Value::Int(0).into(),
+            )),
+            Err(ShellError::DivisionByZero)
+        );
+    }
+
+    fn binary(left: Expression, operator: BinaryOperator, right: Expression) -> Expression {
+        Expression::Binary {
+            left: Box::new(left),
+            operator,
+            right: Box::new(right),
+        }
     }
 }
