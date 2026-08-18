@@ -1,7 +1,7 @@
 use crate::tokens::{Token, TokenizeError, tokenize};
 use crate::value::{TypeName, Value};
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedCommand {
     pub name: String,
     pub args: Vec<Expression>,
@@ -64,13 +64,13 @@ impl BinaryOperator {
     }
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Redirections {
     pub stdin: Option<String>,
     pub stdout: Option<OutputRedirection>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputRedirection {
     pub target: String,
     pub append: bool,
@@ -82,12 +82,12 @@ impl Redirections {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pipeline {
     pub commands: Vec<ParsedCommand>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParsedInput {
     Pipeline(Pipeline),
     Let {
@@ -103,6 +103,8 @@ pub enum ParsedInput {
         name: String,
         value: Expression,
     },
+    Break,
+    Continue,
     If {
         branches: Vec<IfBranch>,
         else_body: Option<Vec<ParsedInput>>,
@@ -111,21 +113,40 @@ pub enum ParsedInput {
         value: Expression,
         arms: Vec<MatchArm>,
     },
+    While {
+        condition: Expression,
+        body: Vec<ParsedInput>,
+    },
+    For {
+        name: String,
+        iterable: Iterable,
+        body: Vec<ParsedInput>,
+    },
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Iterable {
+    Range {
+        start: Expression,
+        end: Expression,
+        inclusive: bool,
+    },
+    Glob(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IfBranch {
     pub condition: Expression,
     pub body: Vec<ParsedInput>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatchArm {
     pub pattern: MatchPattern,
     pub body: ParsedInput,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MatchPattern {
     Literal(Value),
     Identifier(String),
@@ -141,6 +162,7 @@ pub enum ParseError {
     InvalidEnvironmentName(String),
     InvalidTypeName(String),
     InvalidVariableName(String),
+    InvalidIterable(String),
     MissingBlockStart,
     MissingAssignmentValue,
     MissingRedirectionTarget,
@@ -168,6 +190,14 @@ pub fn parse(input: &str) -> Result<ParsedInput, ParseError> {
         return parse_match(input);
     }
 
+    if input.starts_with("while ") {
+        return parse_while(input);
+    }
+
+    if input.starts_with("for ") {
+        return parse_for(input);
+    }
+
     let tokens = tokenize(input)?;
 
     if tokens.is_empty() {
@@ -178,6 +208,8 @@ pub fn parse(input: &str) -> Result<ParsedInput, ParseError> {
         [Token::Word(keyword), rest @ ..] if keyword == "let" => {
             return parse_let(rest);
         }
+        [Token::Word(keyword)] if keyword == "break" => return Ok(ParsedInput::Break),
+        [Token::Word(keyword)] if keyword == "continue" => return Ok(ParsedInput::Continue),
         [Token::Word(name), Token::Assign, rest @ ..] if name.starts_with("env.") => {
             return parse_environment_assignment(name, rest);
         }
@@ -275,6 +307,82 @@ fn parse_match(input: &str) -> Result<ParsedInput, ParseError> {
     })
 }
 
+fn parse_while(input: &str) -> Result<ParsedInput, ParseError> {
+    let lines = normalized_lines(input);
+    let Some(header) = lines.first() else {
+        return Err(ParseError::EmptyCommand);
+    };
+
+    let condition_source = header
+        .strip_prefix("while ")
+        .and_then(|line| line.strip_suffix('{'))
+        .map(str::trim)
+        .ok_or(ParseError::MissingBlockStart)?;
+    let (body, _) = parse_block_body(&lines, 1)?;
+
+    Ok(ParsedInput::While {
+        condition: parse_expression_from_source(condition_source)?,
+        body,
+    })
+}
+
+fn parse_for(input: &str) -> Result<ParsedInput, ParseError> {
+    let lines = normalized_lines(input);
+    let Some(header) = lines.first() else {
+        return Err(ParseError::EmptyCommand);
+    };
+
+    let header = header
+        .strip_prefix("for ")
+        .and_then(|line| line.strip_suffix('{'))
+        .map(str::trim)
+        .ok_or(ParseError::MissingBlockStart)?;
+    let Some((name, iterable_source)) = header.split_once(" in ") else {
+        return Err(ParseError::InvalidIterable(header.into()));
+    };
+    let name = name.trim();
+
+    if !is_valid_identifier(name) {
+        return Err(ParseError::InvalidVariableName(name.into()));
+    }
+
+    if is_reserved_name(name) {
+        return Err(ParseError::ReservedName(name.into()));
+    }
+
+    let (body, _) = parse_block_body(&lines, 1)?;
+
+    Ok(ParsedInput::For {
+        name: name.into(),
+        iterable: parse_iterable(iterable_source.trim())?,
+        body,
+    })
+}
+
+fn parse_iterable(input: &str) -> Result<Iterable, ParseError> {
+    if let Some((start, end)) = input.split_once("..=") {
+        return Ok(Iterable::Range {
+            start: parse_expression_from_source(start.trim())?,
+            end: parse_expression_from_source(end.trim())?,
+            inclusive: true,
+        });
+    }
+
+    if let Some((start, end)) = input.split_once("..") {
+        return Ok(Iterable::Range {
+            start: parse_expression_from_source(start.trim())?,
+            end: parse_expression_from_source(end.trim())?,
+            inclusive: false,
+        });
+    }
+
+    if input.contains('*') {
+        return Ok(Iterable::Glob(input.into()));
+    }
+
+    Err(ParseError::InvalidIterable(input.into()))
+}
+
 fn parse_block_body(
     lines: &[&str],
     start_index: usize,
@@ -289,11 +397,74 @@ fn parse_block_body(
             return Ok((body, index));
         }
 
-        body.push(parse(line)?);
-        index += 1;
+        if starts_block_statement(line) {
+            let (statement, next_index) = collect_block_statement(lines, index);
+
+            body.push(parse(&statement)?);
+            index = next_index;
+        } else {
+            body.push(parse(line)?);
+            index += 1;
+        }
     }
 
     Ok((body, index))
+}
+
+fn starts_block_statement(line: &str) -> bool {
+    (line.starts_with("if ")
+        || line.starts_with("match ")
+        || line.starts_with("while ")
+        || line.starts_with("for "))
+        && line.ends_with('{')
+}
+
+fn collect_block_statement(lines: &[&str], start_index: usize) -> (String, usize) {
+    let mut statement = String::new();
+    let mut balance = 0;
+    let mut index = start_index;
+
+    while index < lines.len() {
+        let line = lines[index];
+
+        if !statement.is_empty() {
+            statement.push('\n');
+        }
+        statement.push_str(line);
+        balance += brace_delta(line);
+        index += 1;
+
+        if balance <= 0 {
+            break;
+        }
+    }
+
+    (statement, index)
+}
+
+fn brace_delta(input: &str) -> i32 {
+    let mut balance = 0;
+    let mut in_single_quotes = false;
+    let mut in_double_quotes = false;
+    let mut escaped = false;
+
+    for ch in input.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+
+        match ch {
+            '\\' if !in_single_quotes => escaped = true,
+            '\'' if !in_double_quotes => in_single_quotes = !in_single_quotes,
+            '"' if !in_single_quotes => in_double_quotes = !in_double_quotes,
+            '{' if !in_single_quotes && !in_double_quotes => balance += 1,
+            '}' if !in_single_quotes && !in_double_quotes => balance -= 1,
+            _ => {}
+        }
+    }
+
+    balance
 }
 
 fn normalized_lines(input: &str) -> Vec<&str> {
@@ -1179,6 +1350,131 @@ match environment {
         MatchPattern::Literal(Value::String("production".into()))
     );
     assert_eq!(arms[2].pattern, MatchPattern::Wildcard);
+}
+
+#[test]
+fn parses_while_block() {
+    let result = parse(
+        r#"
+while retries < 3 {
+    print retries
+    retries = retries + 1
+}
+"#,
+    )
+    .unwrap();
+
+    let ParsedInput::While { condition, body } = result else {
+        panic!("expected while");
+    };
+
+    assert_eq!(
+        condition,
+        Expression::Binary {
+            left: Box::new(Expression::Identifier("retries".into())),
+            operator: BinaryOperator::Less,
+            right: Box::new(Value::Int(3).into()),
+        }
+    );
+    assert_eq!(body.len(), 2);
+}
+
+#[test]
+fn parses_while_block_with_nested_break() {
+    let result = parse(
+        r#"
+while true {
+    print "forever"
+    if status != 0 {
+        break
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let ParsedInput::While { condition, body } = result else {
+        panic!("expected while");
+    };
+
+    assert_eq!(condition, Value::Bool(true).into());
+    assert_eq!(body.len(), 2);
+    assert!(matches!(body[1], ParsedInput::If { .. }));
+}
+
+#[test]
+fn parses_exclusive_for_range() {
+    let result = parse(
+        r#"
+for i in 0..10 {
+    print i
+}
+"#,
+    )
+    .unwrap();
+
+    let ParsedInput::For {
+        name,
+        iterable,
+        body,
+    } = result
+    else {
+        panic!("expected for");
+    };
+
+    assert_eq!(name, "i");
+    assert_eq!(
+        iterable,
+        Iterable::Range {
+            start: Value::Int(0).into(),
+            end: Value::Int(10).into(),
+            inclusive: false,
+        }
+    );
+    assert_eq!(body.len(), 1);
+}
+
+#[test]
+fn parses_inclusive_for_range() {
+    let result = parse(
+        r#"
+for i in 0..=10 {
+    print i
+}
+"#,
+    )
+    .unwrap();
+
+    let ParsedInput::For { iterable, .. } = result else {
+        panic!("expected for");
+    };
+
+    assert_eq!(
+        iterable,
+        Iterable::Range {
+            start: Value::Int(0).into(),
+            end: Value::Int(10).into(),
+            inclusive: true,
+        }
+    );
+}
+
+#[test]
+fn parses_for_glob() {
+    let result = parse(
+        r#"
+for file in *.rs {
+    print file
+}
+"#,
+    )
+    .unwrap();
+
+    let ParsedInput::For { iterable, .. } = result else {
+        panic!("expected for");
+    };
+
+    assert_eq!(iterable, Iterable::Glob("*.rs".into()));
 }
 
 #[test]
