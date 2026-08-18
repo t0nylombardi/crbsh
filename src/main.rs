@@ -51,6 +51,7 @@ fn main() {
         let args = &parsed.args;
 
         if pipeline.commands.len() == 1
+            && parsed.redirections.is_empty()
             && let Some(builtin) = shell.builtins.get(command)
         {
             match builtin(&mut shell, args) {
