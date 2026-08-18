@@ -8,7 +8,8 @@ mod tokens;
 use std::io::{self, Write};
 
 use builtins::BuiltinOutcome;
-use shell::Shell;
+use parser::ParsedInput;
+use shell::{NativeValue, Shell};
 
 fn main() {
     let mut shell = Shell::new();
@@ -29,14 +30,31 @@ fn main() {
             continue;
         }
 
-        let pipeline = match parser::parse(input) {
-            Ok(pipeline) => pipeline,
+        let parsed_input = match parser::parse(input) {
+            Ok(parsed_input) => parsed_input,
 
             Err(err) => {
                 eprintln!("crbsh: parse error: {err:?}");
                 shell.exit_code = 2;
                 continue;
             }
+        };
+
+        let pipeline = match parsed_input {
+            ParsedInput::Let { name, value } => {
+                shell.set_variable(name, NativeValue::parse(&value));
+                shell.exit_code = 0;
+                continue;
+            }
+
+            ParsedInput::EnvironmentAssignment { name, value } => {
+                let value = shell.resolve_word(&value);
+                shell.set_environment(name, value);
+                shell.exit_code = 0;
+                continue;
+            }
+
+            ParsedInput::Pipeline(pipeline) => pipeline,
         };
 
         let parsed = match pipeline.commands.first() {
@@ -54,7 +72,12 @@ fn main() {
             && parsed.redirections.is_empty()
             && let Some(builtin) = shell.builtins.get(command)
         {
-            match builtin(&mut shell, args) {
+            let resolved_args = args
+                .iter()
+                .map(|arg| shell.resolve_word(arg))
+                .collect::<Vec<_>>();
+
+            match builtin(&mut shell, &resolved_args) {
                 Ok(BuiltinOutcome::Continue) => {
                     shell.exit_code = 0;
                 }
@@ -72,7 +95,7 @@ fn main() {
             continue;
         }
 
-        match executor::execute_pipeline(&pipeline) {
+        match executor::execute_pipeline(&shell, &pipeline) {
             Ok(code) => {
                 shell.exit_code = code;
             }

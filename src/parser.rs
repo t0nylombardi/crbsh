@@ -31,9 +31,20 @@ pub struct Pipeline {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+pub enum ParsedInput {
+    Pipeline(Pipeline),
+    Let { name: String, value: String },
+    EnvironmentAssignment { name: String, value: String },
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub enum ParseError {
     Tokenize(TokenizeError),
     EmptyCommand,
+    ExpectedAssignmentOperator,
+    InvalidEnvironmentName(String),
+    InvalidVariableName(String),
+    MissingAssignmentValue,
     MissingRedirectionTarget,
     UnsupportedRedirection(Token),
     UnexpectedToken(Token),
@@ -45,13 +56,90 @@ impl From<TokenizeError> for ParseError {
     }
 }
 
-pub fn parse(input: &str) -> Result<Pipeline, ParseError> {
+pub fn parse(input: &str) -> Result<ParsedInput, ParseError> {
     let tokens = tokenize(input)?;
 
     if tokens.is_empty() {
         return Err(ParseError::EmptyCommand);
     }
 
+    match tokens.as_slice() {
+        [
+            Token::Word(keyword),
+            Token::Word(name),
+            Token::Word(operator),
+            rest @ ..,
+        ] if keyword == "let" => {
+            return parse_let(name, operator, rest);
+        }
+        [Token::Word(name), Token::Word(operator), rest @ ..] if name.starts_with("env.") => {
+            return parse_environment_assignment(name, operator, rest);
+        }
+        [Token::Word(name)] if name == "env." => {
+            return Err(ParseError::UnexpectedToken(Token::Word(name.clone())));
+        }
+        _ => {}
+    }
+
+    parse_pipeline(tokens).map(ParsedInput::Pipeline)
+}
+
+fn parse_let(name: &str, operator: &str, rest: &[Token]) -> Result<ParsedInput, ParseError> {
+    if !is_valid_identifier(name) {
+        return Err(ParseError::InvalidVariableName(name.into()));
+    }
+
+    let value = parse_assignment_value(operator, rest)?;
+
+    Ok(ParsedInput::Let {
+        name: name.into(),
+        value,
+    })
+}
+
+fn parse_environment_assignment(
+    name: &str,
+    operator: &str,
+    rest: &[Token],
+) -> Result<ParsedInput, ParseError> {
+    let Some(name) = name.strip_prefix("env.") else {
+        unreachable!("environment assignments are prefiltered by prefix");
+    };
+
+    if !is_valid_environment_name(name) {
+        return Err(ParseError::InvalidEnvironmentName(name.into()));
+    }
+
+    let value = parse_assignment_value(operator, rest)?;
+
+    Ok(ParsedInput::EnvironmentAssignment {
+        name: name.into(),
+        value,
+    })
+}
+
+fn parse_assignment_value(operator: &str, rest: &[Token]) -> Result<String, ParseError> {
+    if operator != "=" {
+        return Err(ParseError::ExpectedAssignmentOperator);
+    }
+
+    if rest.is_empty() {
+        return Err(ParseError::MissingAssignmentValue);
+    }
+
+    let mut words = Vec::new();
+
+    for token in rest {
+        match token {
+            Token::Word(value) => words.push(value.clone()),
+            token => return Err(ParseError::UnexpectedToken(token.clone())),
+        }
+    }
+
+    Ok(words.join(" "))
+}
+
+fn parse_pipeline(tokens: Vec<Token>) -> Result<Pipeline, ParseError> {
     let mut commands = Vec::new();
     let mut current: Option<ParsedCommand> = None;
     let mut pending_redirection = None;
@@ -144,19 +232,37 @@ fn ensure_current_command(current: &Option<ParsedCommand>, token: Token) -> Resu
     }
 }
 
+fn is_valid_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+
+    match chars.next() {
+        Some(ch) if ch == '_' || ch.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+
+    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn is_valid_environment_name(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
 #[test]
 fn parses_simple_command() {
     let result = parse("print hello").unwrap();
 
     assert_eq!(
         result,
-        Pipeline {
+        ParsedInput::Pipeline(Pipeline {
             commands: vec![ParsedCommand {
                 name: "print".into(),
                 args: vec!["hello".into()],
                 redirections: Redirections::default(),
             }],
-        }
+        })
     );
 }
 
@@ -166,7 +272,7 @@ fn parses_pipeline() {
 
     assert_eq!(
         result,
-        Pipeline {
+        ParsedInput::Pipeline(Pipeline {
             commands: vec![
                 ParsedCommand {
                     name: "ls".into(),
@@ -184,7 +290,7 @@ fn parses_pipeline() {
                     redirections: Redirections::default(),
                 },
             ],
-        }
+        })
     );
 }
 
@@ -194,7 +300,7 @@ fn parses_output_redirection() {
 
     assert_eq!(
         result,
-        Pipeline {
+        ParsedInput::Pipeline(Pipeline {
             commands: vec![ParsedCommand {
                 name: "print".into(),
                 args: vec!["hello".into()],
@@ -206,13 +312,16 @@ fn parses_output_redirection() {
                     }),
                 },
             }],
-        }
+        })
     );
 }
 
 #[test]
 fn parses_append_redirection() {
     let result = parse("print hello >> out.txt").unwrap();
+    let ParsedInput::Pipeline(result) = result else {
+        panic!("expected pipeline");
+    };
 
     assert_eq!(
         result.commands[0].redirections.stdout,
@@ -229,7 +338,7 @@ fn parses_input_and_output_redirection() {
 
     assert_eq!(
         result,
-        Pipeline {
+        ParsedInput::Pipeline(Pipeline {
             commands: vec![ParsedCommand {
                 name: "grep".into(),
                 args: vec!["crab".into()],
@@ -241,13 +350,16 @@ fn parses_input_and_output_redirection() {
                     }),
                 },
             }],
-        }
+        })
     );
 }
 
 #[test]
 fn parses_pipeline_output_redirection() {
     let result = parse("ls | grep rs > results.txt").unwrap();
+    let ParsedInput::Pipeline(result) = result else {
+        panic!("expected pipeline");
+    };
 
     assert_eq!(
         result.commands[1].redirections.stdout,
@@ -256,6 +368,62 @@ fn parses_pipeline_output_redirection() {
             append: false,
         })
     );
+}
+
+#[test]
+fn parses_native_variable_assignment() {
+    let result = parse(r#"let project = "crbsh""#);
+
+    assert_eq!(
+        result,
+        Ok(ParsedInput::Let {
+            name: "project".into(),
+            value: "crbsh".into(),
+        })
+    );
+}
+
+#[test]
+fn parses_native_integer_assignment() {
+    let result = parse("let retries = 3");
+
+    assert_eq!(
+        result,
+        Ok(ParsedInput::Let {
+            name: "retries".into(),
+            value: "3".into(),
+        })
+    );
+}
+
+#[test]
+fn parses_environment_assignment() {
+    let result = parse(r#"env.RUST_LOG = "debug""#);
+
+    assert_eq!(
+        result,
+        Ok(ParsedInput::EnvironmentAssignment {
+            name: "RUST_LOG".into(),
+            value: "debug".into(),
+        })
+    );
+}
+
+#[test]
+fn rejects_environment_namespace_as_command() {
+    let result = parse("env.");
+
+    assert_eq!(
+        result,
+        Err(ParseError::UnexpectedToken(Token::Word("env.".into())))
+    );
+}
+
+#[test]
+fn rejects_missing_assignment_value() {
+    let result = parse("let project =");
+
+    assert_eq!(result, Err(ParseError::MissingAssignmentValue));
 }
 
 #[test]

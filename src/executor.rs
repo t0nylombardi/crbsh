@@ -4,6 +4,7 @@ use std::process::{Command, Stdio};
 
 use crate::builtins;
 use crate::parser::{ParsedCommand, Pipeline};
+use crate::shell::Shell;
 
 #[derive(Debug)]
 pub struct ExecutionError {
@@ -11,15 +12,15 @@ pub struct ExecutionError {
     pub source: io::Error,
 }
 
-pub fn execute_pipeline(pipeline: &Pipeline) -> Result<i32, ExecutionError> {
+pub fn execute_pipeline(shell: &Shell, pipeline: &Pipeline) -> Result<i32, ExecutionError> {
     if pipeline.commands.len() == 1 {
         let command = &pipeline.commands[0];
 
         if command.name == "print" {
-            return execute_print(command);
+            return execute_print(shell, command);
         }
 
-        return execute_single_external(command);
+        return execute_single_external(shell, command);
     }
 
     let mut children = Vec::new();
@@ -27,7 +28,7 @@ pub fn execute_pipeline(pipeline: &Pipeline) -> Result<i32, ExecutionError> {
     let mut previous_stdout = None;
     let start_index = match pipeline.commands.first() {
         Some(command) if command.name == "print" => {
-            initial_input = Some(builtins::print::output(&command.args).into_bytes());
+            initial_input = Some(print_output(shell, command).into_bytes());
             1
         }
         _ => 0,
@@ -36,7 +37,9 @@ pub fn execute_pipeline(pipeline: &Pipeline) -> Result<i32, ExecutionError> {
 
     for (index, command) in pipeline.commands.iter().enumerate().skip(start_index) {
         let mut process = Command::new(&command.name);
-        process.args(&command.args);
+        process
+            .args(resolved_args(shell, command))
+            .envs(shell.environment_overrides());
 
         if let Some(path) = &command.redirections.stdin {
             let input = File::open(path).map_err(|source| ExecutionError {
@@ -94,9 +97,11 @@ pub fn execute_pipeline(pipeline: &Pipeline) -> Result<i32, ExecutionError> {
     Ok(exit_code)
 }
 
-fn execute_single_external(command: &ParsedCommand) -> Result<i32, ExecutionError> {
+fn execute_single_external(shell: &Shell, command: &ParsedCommand) -> Result<i32, ExecutionError> {
     let mut process = Command::new(&command.name);
-    process.args(&command.args);
+    process
+        .args(resolved_args(shell, command))
+        .envs(shell.environment_overrides());
 
     if let Some(path) = &command.redirections.stdin {
         let input = File::open(path).map_err(|source| ExecutionError {
@@ -122,8 +127,8 @@ fn execute_single_external(command: &ParsedCommand) -> Result<i32, ExecutionErro
     Ok(status.code().unwrap_or(1))
 }
 
-fn execute_print(command: &ParsedCommand) -> Result<i32, ExecutionError> {
-    let output = builtins::print::output(&command.args);
+fn execute_print(shell: &Shell, command: &ParsedCommand) -> Result<i32, ExecutionError> {
+    let output = print_output(shell, command);
 
     if let Some(redirection) = command.redirections.stdout.as_ref() {
         let mut file = output_file(command, &redirection.target, redirection.append)?;
@@ -138,6 +143,20 @@ fn execute_print(command: &ParsedCommand) -> Result<i32, ExecutionError> {
     }
 
     Ok(0)
+}
+
+fn print_output(shell: &Shell, command: &ParsedCommand) -> String {
+    let args = resolved_args(shell, command);
+
+    builtins::print::output(&args)
+}
+
+fn resolved_args(shell: &Shell, command: &ParsedCommand) -> Vec<String> {
+    command
+        .args
+        .iter()
+        .map(|arg| shell.resolve_word(arg))
+        .collect()
 }
 
 fn output_file(command: &ParsedCommand, path: &str, append: bool) -> Result<File, ExecutionError> {
@@ -160,6 +179,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::parser::{OutputRedirection, ParsedCommand, Pipeline, Redirections};
+    use crate::shell::{NativeValue, Shell};
 
     use super::execute_pipeline;
 
@@ -168,19 +188,24 @@ mod tests {
         let dir = temp_dir("redirects_print_output_to_file");
         let output = dir.join("out.txt");
 
-        let code = execute_pipeline(&Pipeline {
-            commands: vec![ParsedCommand {
-                name: "print".into(),
-                args: vec!["hello".into()],
-                redirections: Redirections {
-                    stdin: None,
-                    stdout: Some(OutputRedirection {
-                        target: output.to_string_lossy().into_owned(),
-                        append: false,
-                    }),
-                },
-            }],
-        })
+        let shell = Shell::new();
+
+        let code = execute_pipeline(
+            &shell,
+            &Pipeline {
+                commands: vec![ParsedCommand {
+                    name: "print".into(),
+                    args: vec!["hello".into()],
+                    redirections: Redirections {
+                        stdin: None,
+                        stdout: Some(OutputRedirection {
+                            target: output.to_string_lossy().into_owned(),
+                            append: false,
+                        }),
+                    },
+                }],
+            },
+        )
         .unwrap();
 
         assert_eq!(code, 0);
@@ -194,19 +219,24 @@ mod tests {
 
         fs::write(&output, "first\n").unwrap();
 
-        let code = execute_pipeline(&Pipeline {
-            commands: vec![ParsedCommand {
-                name: "print".into(),
-                args: vec!["second".into()],
-                redirections: Redirections {
-                    stdin: None,
-                    stdout: Some(OutputRedirection {
-                        target: output.to_string_lossy().into_owned(),
-                        append: true,
-                    }),
-                },
-            }],
-        })
+        let shell = Shell::new();
+
+        let code = execute_pipeline(
+            &shell,
+            &Pipeline {
+                commands: vec![ParsedCommand {
+                    name: "print".into(),
+                    args: vec!["second".into()],
+                    redirections: Redirections {
+                        stdin: None,
+                        stdout: Some(OutputRedirection {
+                            target: output.to_string_lossy().into_owned(),
+                            append: true,
+                        }),
+                    },
+                }],
+            },
+        )
         .unwrap();
 
         assert_eq!(code, 0);
@@ -221,19 +251,24 @@ mod tests {
 
         fs::write(&input, "crab\nstone crab\nfish\n").unwrap();
 
-        let code = execute_pipeline(&Pipeline {
-            commands: vec![ParsedCommand {
-                name: "grep".into(),
-                args: vec!["crab".into()],
-                redirections: Redirections {
-                    stdin: Some(input.to_string_lossy().into_owned()),
-                    stdout: Some(OutputRedirection {
-                        target: output.to_string_lossy().into_owned(),
-                        append: false,
-                    }),
-                },
-            }],
-        })
+        let shell = Shell::new();
+
+        let code = execute_pipeline(
+            &shell,
+            &Pipeline {
+                commands: vec![ParsedCommand {
+                    name: "grep".into(),
+                    args: vec!["crab".into()],
+                    redirections: Redirections {
+                        stdin: Some(input.to_string_lossy().into_owned()),
+                        stdout: Some(OutputRedirection {
+                            target: output.to_string_lossy().into_owned(),
+                            append: false,
+                        }),
+                    },
+                }],
+            },
+        )
         .unwrap();
 
         assert_eq!(code, 0);
@@ -245,16 +280,60 @@ mod tests {
         let dir = temp_dir("redirects_pipeline_output");
         let output = dir.join("results.txt");
 
-        let code = execute_pipeline(&Pipeline {
-            commands: vec![
-                ParsedCommand {
+        let shell = Shell::new();
+
+        let code = execute_pipeline(
+            &shell,
+            &Pipeline {
+                commands: vec![
+                    ParsedCommand {
+                        name: "print".into(),
+                        args: vec!["parser".into()],
+                        redirections: Redirections::default(),
+                    },
+                    ParsedCommand {
+                        name: "grep".into(),
+                        args: vec!["pars".into()],
+                        redirections: Redirections {
+                            stdin: None,
+                            stdout: Some(OutputRedirection {
+                                target: output.to_string_lossy().into_owned(),
+                                append: false,
+                            }),
+                        },
+                    },
+                ],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(code, 0);
+        assert_eq!(fs::read_to_string(output).unwrap(), "parser\n");
+    }
+
+    #[test]
+    fn resolves_print_arguments_from_shell_values() {
+        let dir = temp_dir("resolves_print_arguments_from_shell_values");
+        let output = dir.join("out.txt");
+        let mut shell = Shell::new();
+
+        shell.set_variable("project", NativeValue::String("crbsh".into()));
+        shell.set_variable("retries", NativeValue::Int(3));
+        shell.set_environment("CRBSH_TEST_ENV", "debug");
+        shell.exit_code = 42;
+
+        let code = execute_pipeline(
+            &shell,
+            &Pipeline {
+                commands: vec![ParsedCommand {
                     name: "print".into(),
-                    args: vec!["parser".into()],
-                    redirections: Redirections::default(),
-                },
-                ParsedCommand {
-                    name: "grep".into(),
-                    args: vec!["pars".into()],
+                    args: vec![
+                        "project".into(),
+                        "retries".into(),
+                        "@CRBSH_TEST_ENV".into(),
+                        "env.CRBSH_TEST_ENV".into(),
+                        "status".into(),
+                    ],
                     redirections: Redirections {
                         stdin: None,
                         stdout: Some(OutputRedirection {
@@ -262,13 +341,16 @@ mod tests {
                             append: false,
                         }),
                     },
-                },
-            ],
-        })
+                }],
+            },
+        )
         .unwrap();
 
         assert_eq!(code, 0);
-        assert_eq!(fs::read_to_string(output).unwrap(), "parser\n");
+        assert_eq!(
+            fs::read_to_string(output).unwrap(),
+            "crbsh 3 debug debug 42\n"
+        );
     }
 
     fn temp_dir(test_name: &str) -> PathBuf {
