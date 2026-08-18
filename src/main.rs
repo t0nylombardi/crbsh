@@ -8,6 +8,7 @@ mod value;
 
 use std::fs;
 use std::io::{self, Write};
+use std::path::Path;
 
 use builtins::BuiltinOutcome;
 use parser::{Iterable, ParsedInput};
@@ -44,8 +45,20 @@ enum ControlFlow {
 }
 
 fn main() {
+    let args = std::env::args().collect::<Vec<_>>();
     let mut shell = Shell::new();
 
+    match args.as_slice() {
+        [_] => run_repl(&mut shell),
+        [_, path] => std::process::exit(run_script(&mut shell, path)),
+        _ => {
+            eprintln!("crbsh: usage: crbsh [script.crb]");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn run_repl(shell: &mut Shell) {
     loop {
         print!("{}", prompt::render());
         io::stdout().flush().unwrap();
@@ -69,23 +82,106 @@ fn main() {
             }
         };
 
-        match execute_input(&mut shell, parsed_input) {
-            ControlFlow::Exit(code) => std::process::exit(code),
-            ControlFlow::Break => {
-                eprintln!("crbsh: break outside loop");
-                shell.exit_code = 2;
+        let flow = execute_input(shell, parsed_input);
+        handle_control_flow(shell, flow, true);
+    }
+}
+
+fn run_script(shell: &mut Shell, path: &str) -> i32 {
+    if Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        != Some("crb")
+    {
+        eprintln!("crbsh: script files must use the .crb extension");
+        return 2;
+    }
+
+    let source = match fs::read_to_string(path) {
+        Ok(source) => source,
+        Err(err) => {
+            eprintln!("crbsh: {path}: {err}");
+            return 1;
+        }
+    };
+
+    let statements = collect_source_statements(&source);
+
+    for statement in statements {
+        let parsed_input = match parser::parse(&statement) {
+            Ok(parsed_input) => parsed_input,
+            Err(err) => {
+                eprintln!("crbsh: {}", parser::format_error(&err));
+                return 2;
             }
-            ControlFlow::LoopContinue => {
-                eprintln!("crbsh: continue outside loop");
-                shell.exit_code = 2;
-            }
-            ControlFlow::Return(_) => {
-                eprintln!("crbsh: return outside function");
-                shell.exit_code = 2;
-            }
-            ControlFlow::Continue => {}
+        };
+
+        let flow = execute_input(shell, parsed_input);
+        if let Some(code) = handle_control_flow(shell, flow, false) {
+            return code;
         }
     }
+
+    shell.exit_code
+}
+
+fn handle_control_flow(shell: &mut Shell, flow: ControlFlow, interactive: bool) -> Option<i32> {
+    match flow {
+        ControlFlow::Exit(code) => {
+            if interactive {
+                std::process::exit(code);
+            }
+
+            return Some(code);
+        }
+        ControlFlow::Break => {
+            eprintln!("crbsh: break outside loop");
+            shell.exit_code = 2;
+        }
+        ControlFlow::LoopContinue => {
+            eprintln!("crbsh: continue outside loop");
+            shell.exit_code = 2;
+        }
+        ControlFlow::Return(_) => {
+            eprintln!("crbsh: return outside function");
+            shell.exit_code = 2;
+        }
+        ControlFlow::Continue => {}
+    }
+
+    if interactive {
+        None
+    } else if shell.exit_code == 2 {
+        Some(2)
+    } else {
+        None
+    }
+}
+
+fn collect_source_statements(source: &str) -> Vec<String> {
+    let mut statements = Vec::new();
+    let mut current = String::new();
+
+    for line in source.lines() {
+        if current.is_empty() && line.trim().is_empty() {
+            continue;
+        }
+
+        if !current.is_empty() {
+            current.push('\n');
+        }
+        current.push_str(line);
+
+        if brace_balance(&current) <= 0 && !current.trim().is_empty() {
+            statements.push(std::mem::take(&mut current));
+        }
+    }
+
+    if !current.trim().is_empty() {
+        statements.push(current);
+    }
+
+    statements
 }
 
 fn read_input() -> Result<String, ()> {
@@ -769,6 +865,60 @@ fn find_positive(x: int) -> int {
         );
     }
 
+    #[test]
+    fn source_file_statements_preserve_block_units() {
+        let statements = collect_source_statements(
+            r#"
+let x = 1
+
+fn add(a: int, b: int) -> int {
+    return a + b
+}
+
+let total = add(2, 3)
+"#,
+        );
+
+        assert_eq!(statements.len(), 3);
+        assert_eq!(statements[0].trim(), "let x = 1");
+        assert!(statements[1].contains("fn add"));
+        assert_eq!(statements[2].trim(), "let total = add(2, 3)");
+    }
+
+    #[test]
+    fn runs_crb_script_file_in_single_shell_state() {
+        let path = temp_script_path("runs_crb_script_file_in_single_shell_state");
+        fs::write(
+            &path,
+            r#"
+fn add(a: int, b: int) -> int {
+    return a + b
+}
+
+let total = add(2, 3)
+"#,
+        )
+        .unwrap();
+
+        let mut shell = Shell::new();
+        let code = run_script(&mut shell, path.to_str().unwrap());
+
+        fs::remove_file(path).unwrap();
+
+        assert_eq!(code, 0);
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("total".into())),
+            Ok(Value::Int(5))
+        );
+    }
+
+    #[test]
+    fn rejects_non_crb_script_extension() {
+        let mut shell = Shell::new();
+
+        assert_eq!(run_script(&mut shell, "script.txt"), 2);
+    }
+
     fn run(shell: &mut Shell, input: &str) {
         let parsed = parser::parse(input).unwrap();
         assert!(matches!(
@@ -776,5 +926,16 @@ fn find_positive(x: int) -> int {
             ControlFlow::Continue
         ));
         assert_eq!(shell.exit_code, 0);
+    }
+
+    fn temp_script_path(name: &str) -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+
+        path.push(format!("crbsh-{name}-{unique}.crb"));
+        path
     }
 }
