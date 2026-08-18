@@ -11,13 +11,35 @@ use std::io::{self, Write};
 
 use builtins::BuiltinOutcome;
 use parser::{Iterable, ParsedInput};
-use shell::Shell;
+use shell::{Shell, ShellError};
+use value::TypeName;
 use value::Value;
+
+enum EvalError {
+    Shell(ShellError),
+    Function(String),
+}
+
+impl std::fmt::Display for EvalError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Shell(error) => write!(formatter, "{error}"),
+            Self::Function(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl From<ShellError> for EvalError {
+    fn from(error: ShellError) -> Self {
+        Self::Shell(error)
+    }
+}
 
 enum ControlFlow {
     Continue,
     Break,
     LoopContinue,
+    Return(Option<Value>),
     Exit(i32),
 }
 
@@ -55,6 +77,10 @@ fn main() {
             }
             ControlFlow::LoopContinue => {
                 eprintln!("crbsh: continue outside loop");
+                shell.exit_code = 2;
+            }
+            ControlFlow::Return(_) => {
+                eprintln!("crbsh: return outside function");
                 shell.exit_code = 2;
             }
             ControlFlow::Continue => {}
@@ -113,12 +139,17 @@ fn brace_balance(input: &str) -> i32 {
 
 fn execute_input(shell: &mut Shell, parsed_input: ParsedInput) -> ControlFlow {
     match parsed_input {
+        ParsedInput::FunctionDefinition { name, definition } => {
+            shell.define_function(name, definition);
+            shell.exit_code = 0;
+        }
+
         ParsedInput::Let {
             name,
             type_annotation,
             value,
         } => {
-            let value = match shell.evaluate(&value) {
+            let value = match evaluate_expression(shell, &value) {
                 Ok(value) => value,
                 Err(err) => {
                     eprintln!("crbsh: {err}");
@@ -140,8 +171,24 @@ fn execute_input(shell: &mut Shell, parsed_input: ParsedInput) -> ControlFlow {
 
         ParsedInput::Continue => return ControlFlow::LoopContinue,
 
+        ParsedInput::Return { value } => {
+            let value = match value {
+                Some(value) => match evaluate_expression(shell, &value) {
+                    Ok(value) => Some(value),
+                    Err(err) => {
+                        eprintln!("crbsh: {err}");
+                        shell.exit_code = 2;
+                        return ControlFlow::Continue;
+                    }
+                },
+                None => None,
+            };
+
+            return ControlFlow::Return(value);
+        }
+
         ParsedInput::Assignment { name, value } => {
-            let value = match shell.evaluate(&value) {
+            let value = match evaluate_expression(shell, &value) {
                 Ok(value) => value,
                 Err(err) => {
                     eprintln!("crbsh: {err}");
@@ -159,16 +206,18 @@ fn execute_input(shell: &mut Shell, parsed_input: ParsedInput) -> ControlFlow {
             }
         }
 
-        ParsedInput::EnvironmentAssignment { name, value } => match shell.evaluate(&value) {
-            Ok(value) => {
-                shell.set_environment(name, value.to_string());
-                shell.exit_code = 0;
+        ParsedInput::EnvironmentAssignment { name, value } => {
+            match evaluate_expression(shell, &value) {
+                Ok(value) => {
+                    shell.set_environment(name, value.to_string());
+                    shell.exit_code = 0;
+                }
+                Err(err) => {
+                    eprintln!("crbsh: {err}");
+                    shell.exit_code = 2;
+                }
             }
-            Err(err) => {
-                eprintln!("crbsh: {err}");
-                shell.exit_code = 2;
-            }
-        },
+        }
 
         ParsedInput::If {
             branches,
@@ -220,6 +269,23 @@ fn execute_input(shell: &mut Shell, parsed_input: ParsedInput) -> ControlFlow {
 
             let command = &parsed.name;
             let args = &parsed.args;
+
+            if pipeline.commands.len() == 1
+                && parsed.redirections.is_empty()
+                && shell.function(command).is_some()
+            {
+                let result = execute_function_call(shell, command, args);
+
+                match result {
+                    Ok(_) => shell.exit_code = 0,
+                    Err(err) => {
+                        eprintln!("crbsh: {err}");
+                        shell.exit_code = 2;
+                    }
+                }
+
+                return ControlFlow::Continue;
+            }
 
             if pipeline.commands.len() == 1
                 && parsed.redirections.is_empty()
@@ -279,7 +345,7 @@ fn execute_if(
     else_body: Option<Vec<ParsedInput>>,
 ) -> ControlFlow {
     for branch in branches {
-        let condition = match shell.evaluate(&branch.condition) {
+        let condition = match evaluate_expression(shell, &branch.condition) {
             Ok(Value::Bool(value)) => value,
             Ok(value) => {
                 eprintln!(
@@ -315,7 +381,7 @@ fn execute_match(
     value: parser::Expression,
     arms: Vec<parser::MatchArm>,
 ) -> ControlFlow {
-    let value = match shell.evaluate(&value) {
+    let value = match evaluate_expression(shell, &value) {
         Ok(value) => value,
         Err(err) => {
             eprintln!("crbsh: {err}");
@@ -340,7 +406,7 @@ fn execute_while(
     body: Vec<ParsedInput>,
 ) -> ControlFlow {
     loop {
-        let condition = match shell.evaluate(&condition) {
+        let condition = match evaluate_expression(shell, &condition) {
             Ok(Value::Bool(value)) => value,
             Ok(value) => {
                 eprintln!(
@@ -369,6 +435,7 @@ fn execute_while(
                 shell.exit_code = 0;
                 return ControlFlow::Continue;
             }
+            flow @ ControlFlow::Return(_) => return flow,
             flow @ ControlFlow::Exit(_) => return flow,
         }
     }
@@ -403,6 +470,7 @@ fn execute_for(
                 shell.exit_code = 0;
                 return ControlFlow::Continue;
             }
+            flow @ ControlFlow::Return(_) => return flow,
             flow @ ControlFlow::Exit(_) => return flow,
         }
     }
@@ -412,26 +480,31 @@ fn execute_for(
 }
 
 fn execute_block(shell: &mut Shell, body: Vec<ParsedInput>) -> ControlFlow {
+    shell.push_scope();
+    let mut result = ControlFlow::Continue;
+
     for statement in body {
         let flow = execute_input(shell, statement);
 
         if !matches!(flow, ControlFlow::Continue) {
-            return flow;
+            result = flow;
+            break;
         }
     }
 
-    ControlFlow::Continue
+    shell.pop_scope();
+    result
 }
 
-fn iterable_values(shell: &Shell, iterable: Iterable) -> Result<Vec<Value>, shell::ShellError> {
+fn iterable_values(shell: &mut Shell, iterable: Iterable) -> Result<Vec<Value>, EvalError> {
     match iterable {
         Iterable::Range {
             start,
             end,
             inclusive,
         } => {
-            let start = expect_int(shell.evaluate(&start)?)?;
-            let end = expect_int(shell.evaluate(&end)?)?;
+            let start = expect_int(evaluate_expression(shell, &start)?)?;
+            let end = expect_int(evaluate_expression(shell, &end)?)?;
             let upper = if inclusive {
                 end.saturating_add(1)
             } else {
@@ -447,13 +520,14 @@ fn iterable_values(shell: &Shell, iterable: Iterable) -> Result<Vec<Value>, shel
     }
 }
 
-fn expect_int(value: Value) -> Result<i64, shell::ShellError> {
+fn expect_int(value: Value) -> Result<i64, EvalError> {
     match value {
         Value::Int(value) => Ok(value),
         value => Err(shell::ShellError::TypeMismatch {
             expected: value::TypeName::Int,
             found: value.type_name(),
-        }),
+        }
+        .into()),
     }
 }
 
@@ -492,5 +566,215 @@ fn pattern_matches(shell: &Shell, value: &Value, pattern: &parser::MatchPattern)
         parser::MatchPattern::Identifier(name) => shell
             .evaluate(&parser::Expression::Identifier(name.clone()))
             .is_ok_and(|pattern| value == &pattern),
+    }
+}
+
+fn evaluate_expression(
+    shell: &mut Shell,
+    expression: &parser::Expression,
+) -> Result<Value, EvalError> {
+    match expression {
+        parser::Expression::Literal(value) => Ok(value.clone()),
+        parser::Expression::Identifier(name) => shell
+            .evaluate(&parser::Expression::Identifier(name.clone()))
+            .map_err(Into::into),
+        parser::Expression::EnvironmentVariable(name) => shell
+            .environment_value(name)
+            .map(Value::String)
+            .ok_or_else(|| ShellError::UndefinedEnvironmentVariable(name.clone()).into()),
+        parser::Expression::Status => Ok(Value::Int(i64::from(shell.exit_code))),
+        parser::Expression::Binary {
+            left,
+            operator,
+            right,
+        } => {
+            let left = evaluate_expression(shell, left)?;
+            let right = evaluate_expression(shell, right)?;
+
+            Shell::evaluate_binary(*operator, left, right).map_err(Into::into)
+        }
+        parser::Expression::Call { name, args } => execute_function_call(shell, name, args)
+            .and_then(|value| {
+                value.ok_or_else(|| format!("function '{name}' did not return a value"))
+            })
+            .map_err(EvalError::Function),
+    }
+}
+
+fn execute_function_call(
+    shell: &mut Shell,
+    name: &str,
+    args: &[parser::Expression],
+) -> Result<Option<Value>, String> {
+    let Some(function) = shell.function(name) else {
+        return Err(format!("undefined function '{name}'"));
+    };
+
+    if args.len() != function.params.len() {
+        return Err(format!(
+            "function '{name}' expected {} arguments, found {}",
+            function.params.len(),
+            args.len()
+        ));
+    }
+
+    let values = args
+        .iter()
+        .map(|arg| evaluate_expression(shell, arg).map_err(|err| err.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    shell.push_scope();
+
+    let mut setup_error = None;
+    for (param, value) in function.params.iter().zip(values) {
+        if value.type_name() != param.type_name {
+            setup_error = Some(format!(
+                "type mismatch: expected {}, found {}",
+                param.type_name,
+                value.type_name()
+            ));
+            break;
+        }
+
+        if let Err(err) = shell.declare_variable(&param.name, Some(param.type_name), value) {
+            setup_error = Some(err.to_string());
+            break;
+        }
+    }
+
+    if let Some(err) = setup_error {
+        shell.pop_scope();
+        return Err(err);
+    }
+
+    let flow = execute_block(shell, function.body);
+    shell.pop_scope();
+
+    match flow {
+        ControlFlow::Return(value) => enforce_return_type(name, function.return_type, value),
+        ControlFlow::Continue => {
+            if let Some(return_type) = function.return_type {
+                Err(format!("function '{name}' expected return {return_type}"))
+            } else {
+                Ok(None)
+            }
+        }
+        ControlFlow::Break => Err("break outside loop".into()),
+        ControlFlow::LoopContinue => Err("continue outside loop".into()),
+        ControlFlow::Exit(code) => {
+            shell.exit_code = code;
+            Ok(None)
+        }
+    }
+}
+
+fn enforce_return_type(
+    name: &str,
+    return_type: Option<TypeName>,
+    value: Option<Value>,
+) -> Result<Option<Value>, String> {
+    match (return_type, value) {
+        (Some(expected), Some(value)) if value.type_name() == expected => Ok(Some(value)),
+        (Some(expected), Some(value)) => Err(format!(
+            "type mismatch: expected {expected}, found {}",
+            value.type_name()
+        )),
+        (Some(expected), None) => Err(format!("function '{name}' expected return {expected}")),
+        (None, value) => Ok(value),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::parser::Expression;
+
+    use super::*;
+
+    #[test]
+    fn function_call_expression_returns_value() {
+        let mut shell = Shell::new();
+
+        run(
+            &mut shell,
+            r#"
+fn add(a: int, b: int) -> int {
+    return a + b
+}
+"#,
+        );
+        run(&mut shell, "let total = add(2, 3)");
+
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("total".into())),
+            Ok(Value::Int(5))
+        );
+    }
+
+    #[test]
+    fn function_invocation_uses_fresh_scope() {
+        let mut shell = Shell::new();
+
+        run(&mut shell, "let x = 10");
+        run(
+            &mut shell,
+            r#"
+fn test(x: int) -> int {
+    let y = 5
+    return x
+}
+"#,
+        );
+        run(&mut shell, "let result = test(20)");
+
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("x".into())),
+            Ok(Value::Int(10))
+        );
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("result".into())),
+            Ok(Value::Int(20))
+        );
+        assert!(matches!(
+            shell.evaluate(&Expression::Identifier("y".into())),
+            Err(ShellError::UndefinedVariable(_))
+        ));
+    }
+
+    #[test]
+    fn function_returns_from_nested_block() {
+        let mut shell = Shell::new();
+
+        run(
+            &mut shell,
+            r#"
+fn find_positive(x: int) -> int {
+    if x > 0 {
+        return x
+    }
+
+    return 0
+}
+"#,
+        );
+        run(&mut shell, "let positive = find_positive(3)");
+        run(&mut shell, "let fallback = find_positive(0)");
+
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("positive".into())),
+            Ok(Value::Int(3))
+        );
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("fallback".into())),
+            Ok(Value::Int(0))
+        );
+    }
+
+    fn run(shell: &mut Shell, input: &str) {
+        let parsed = parser::parse(input).unwrap();
+        assert!(matches!(
+            execute_input(shell, parsed),
+            ControlFlow::Continue
+        ));
+        assert_eq!(shell.exit_code, 0);
     }
 }

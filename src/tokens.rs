@@ -8,11 +8,15 @@ pub enum Token {
     Equal,
     NotEqual,
     FatArrow,
+    Arrow,
     Colon,
+    Comma,
     Plus,
     Minus,
     Star,
     Slash,
+    LeftParen,
+    RightParen,
     LessEqual,
     GreaterEqual,
     LeftBrace,
@@ -135,12 +139,36 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, TokenizeError> {
                 tokens.push(Token::Colon);
             }
 
+            ',' if !in_single_quotes && !in_double_quotes => {
+                push_word(&mut tokens, &mut current, &mut quoted);
+                tokens.push(Token::Comma);
+            }
+
+            '(' if !in_single_quotes && !in_double_quotes => {
+                push_word(&mut tokens, &mut current, &mut quoted);
+                tokens.push(Token::LeftParen);
+            }
+
+            ')' if !in_single_quotes && !in_double_quotes => {
+                push_word(&mut tokens, &mut current, &mut quoted);
+                tokens.push(Token::RightParen);
+            }
+
             '+' if !in_single_quotes
                 && !in_double_quotes
                 && current.is_empty()
                 && is_separated_operator(chars.peek()) =>
             {
                 tokens.push(Token::Plus);
+            }
+
+            '-' if !in_single_quotes
+                && !in_double_quotes
+                && current.is_empty()
+                && matches!(chars.peek(), Some('>')) =>
+            {
+                chars.next();
+                tokens.push(Token::Arrow);
             }
 
             '-' if !in_single_quotes
@@ -401,6 +429,43 @@ mod tests {
                 Token::Word("print".into()),
                 Token::StringLiteral("unknown".into()),
                 Token::RightBrace,
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenizes_function_signature_and_call() {
+        let tokens = tokenize("fn add(a: int, b: int) -> int {").unwrap();
+
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Word("fn".into()),
+                Token::Word("add".into()),
+                Token::LeftParen,
+                Token::Word("a".into()),
+                Token::Colon,
+                Token::Word("int".into()),
+                Token::Comma,
+                Token::Word("b".into()),
+                Token::Colon,
+                Token::Word("int".into()),
+                Token::RightParen,
+                Token::Arrow,
+                Token::Word("int".into()),
+                Token::LeftBrace,
+            ]
+        );
+
+        assert_eq!(
+            tokenize("add(2, 3)").unwrap(),
+            vec![
+                Token::Word("add".into()),
+                Token::LeftParen,
+                Token::IntLiteral(2),
+                Token::Comma,
+                Token::IntLiteral(3),
+                Token::RightParen,
             ]
         );
     }

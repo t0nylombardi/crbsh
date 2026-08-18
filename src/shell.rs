@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::builtins::registry::BuiltinRegistry;
-use crate::parser::{BinaryOperator, Expression};
+use crate::parser::{BinaryOperator, Expression, FunctionDefinition};
 use crate::value::{TypeName, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,7 +26,8 @@ pub enum ShellError {
 pub struct Shell {
     pub builtins: BuiltinRegistry,
     pub exit_code: i32,
-    variables: HashMap<String, Value>,
+    scopes: Vec<HashMap<String, Value>>,
+    functions: HashMap<String, FunctionDefinition>,
     environment: HashMap<String, String>,
 }
 
@@ -35,8 +36,19 @@ impl Shell {
         Self {
             builtins: BuiltinRegistry::new(),
             exit_code: 0,
-            variables: HashMap::new(),
+            scopes: vec![HashMap::new()],
+            functions: HashMap::new(),
             environment: HashMap::new(),
+        }
+    }
+
+    pub fn push_scope(&mut self) {
+        self.scopes.push(HashMap::new());
+    }
+
+    pub fn pop_scope(&mut self) {
+        if self.scopes.len() > 1 {
+            self.scopes.pop();
         }
     }
 
@@ -48,13 +60,15 @@ impl Shell {
     ) -> Result<(), ShellError> {
         let name = name.into();
 
-        if self.variables.contains_key(&name) {
+        let scope = self.current_scope_mut();
+
+        if scope.contains_key(&name) {
             return Err(ShellError::VariableAlreadyDefined(name));
         }
 
         enforce_type(type_annotation, &value)?;
 
-        self.variables.insert(name, value);
+        scope.insert(name, value);
 
         Ok(())
     }
@@ -65,7 +79,7 @@ impl Shell {
         value: Value,
     ) -> Result<(), ShellError> {
         let name = name.into();
-        let Some(existing) = self.variables.get_mut(&name) else {
+        let Some(existing) = self.find_variable_mut(&name) else {
             return Err(ShellError::VariableNotDefined(name));
         };
 
@@ -83,7 +97,15 @@ impl Shell {
 
     #[cfg(test)]
     pub fn set_variable(&mut self, name: impl Into<String>, value: Value) {
-        self.variables.insert(name.into(), value);
+        self.current_scope_mut().insert(name.into(), value);
+    }
+
+    pub fn define_function(&mut self, name: impl Into<String>, definition: FunctionDefinition) {
+        self.functions.insert(name.into(), definition);
+    }
+
+    pub fn function(&self, name: &str) -> Option<FunctionDefinition> {
+        self.functions.get(name).cloned()
     }
 
     pub fn set_environment(&mut self, name: impl Into<String>, value: impl Into<String>) {
@@ -100,9 +122,7 @@ impl Shell {
         match expression {
             Expression::Literal(value) => Ok(value.clone()),
             Expression::Identifier(name) => self
-                .variables
-                .get(name)
-                .cloned()
+                .find_variable(name)
                 .ok_or_else(|| ShellError::UndefinedVariable(name.clone())),
             Expression::EnvironmentVariable(name) => self
                 .environment_value(name)
@@ -117,17 +137,17 @@ impl Shell {
                 let left = self.evaluate(left)?;
                 let right = self.evaluate(right)?;
 
-                evaluate_binary(*operator, left, right)
+                Self::evaluate_binary(*operator, left, right)
             }
+            Expression::Call { name, .. } => Err(ShellError::UndefinedVariable(name.clone())),
         }
     }
 
     pub fn resolve_argument(&self, expression: &Expression) -> Result<String, ShellError> {
         match expression {
             Expression::Identifier(name) => Ok(self
-                .variables
-                .get(name)
-                .map(ToString::to_string)
+                .find_variable(name)
+                .map(|value| value.to_string())
                 .unwrap_or_else(|| name.clone())),
             _ => self.evaluate(expression).map(|value| value.to_string()),
         }
@@ -148,11 +168,39 @@ impl Shell {
         names
     }
 
-    fn environment_value(&self, name: &str) -> Option<String> {
+    pub fn environment_value(&self, name: &str) -> Option<String> {
         self.environment
             .get(name)
             .cloned()
             .or_else(|| std::env::var(name).ok())
+    }
+
+    pub fn evaluate_binary(
+        operator: BinaryOperator,
+        left: Value,
+        right: Value,
+    ) -> Result<Value, ShellError> {
+        evaluate_binary(operator, left, right)
+    }
+
+    fn current_scope_mut(&mut self) -> &mut HashMap<String, Value> {
+        self.scopes
+            .last_mut()
+            .expect("shell always has at least one variable scope")
+    }
+
+    fn find_variable(&self, name: &str) -> Option<Value> {
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).cloned())
+    }
+
+    fn find_variable_mut(&mut self, name: &str) -> Option<&mut Value> {
+        self.scopes
+            .iter_mut()
+            .rev()
+            .find_map(|scope| scope.get_mut(name))
     }
 }
 
@@ -409,6 +457,42 @@ mod tests {
         assert_eq!(
             shell.assign_variable("retries", Value::Int(5)),
             Err(ShellError::VariableNotDefined("retries".into()))
+        );
+    }
+
+    #[test]
+    fn inner_scopes_shadow_and_outer_scope_survives() {
+        let mut shell = Shell::new();
+
+        shell.declare_variable("x", None, Value::Int(10)).unwrap();
+        shell.push_scope();
+        shell.declare_variable("x", None, Value::Int(20)).unwrap();
+
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("x".into())),
+            Ok(Value::Int(20))
+        );
+
+        shell.pop_scope();
+
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("x".into())),
+            Ok(Value::Int(10))
+        );
+    }
+
+    #[test]
+    fn assignment_updates_nearest_existing_scope() {
+        let mut shell = Shell::new();
+
+        shell.declare_variable("x", None, Value::Int(10)).unwrap();
+        shell.push_scope();
+        shell.assign_variable("x", Value::Int(20)).unwrap();
+        shell.pop_scope();
+
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("x".into())),
+            Ok(Value::Int(20))
         );
     }
 

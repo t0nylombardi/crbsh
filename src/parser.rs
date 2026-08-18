@@ -14,6 +14,10 @@ pub enum Expression {
     Identifier(String),
     EnvironmentVariable(String),
     Status,
+    Call {
+        name: String,
+        args: Vec<Expression>,
+    },
     Binary {
         left: Box<Expression>,
         operator: BinaryOperator,
@@ -90,6 +94,10 @@ pub struct Pipeline {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParsedInput {
     Pipeline(Pipeline),
+    FunctionDefinition {
+        name: String,
+        definition: FunctionDefinition,
+    },
     Let {
         name: String,
         type_annotation: Option<TypeName>,
@@ -102,6 +110,9 @@ pub enum ParsedInput {
     EnvironmentAssignment {
         name: String,
         value: Expression,
+    },
+    Return {
+        value: Option<Expression>,
     },
     Break,
     Continue,
@@ -122,6 +133,19 @@ pub enum ParsedInput {
         iterable: Iterable,
         body: Vec<ParsedInput>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionDefinition {
+    pub params: Vec<FunctionParam>,
+    pub return_type: Option<TypeName>,
+    pub body: Vec<ParsedInput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionParam {
+    pub name: String,
+    pub type_name: TypeName,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,7 +189,10 @@ pub enum ParseError {
     InvalidIterable(String),
     MissingBlockStart,
     MissingAssignmentValue,
+    MissingFunctionName,
+    MissingParameterList,
     MissingRedirectionTarget,
+    MissingReturnType,
     MissingMatchArrow,
     MissingMatchPattern,
     ReservedName(String),
@@ -198,6 +225,10 @@ pub fn parse(input: &str) -> Result<ParsedInput, ParseError> {
         return parse_for(input);
     }
 
+    if input.starts_with("fn ") {
+        return parse_function(input);
+    }
+
     let tokens = tokenize(input)?;
 
     if tokens.is_empty() {
@@ -210,6 +241,14 @@ pub fn parse(input: &str) -> Result<ParsedInput, ParseError> {
         }
         [Token::Word(keyword)] if keyword == "break" => return Ok(ParsedInput::Break),
         [Token::Word(keyword)] if keyword == "continue" => return Ok(ParsedInput::Continue),
+        [Token::Word(keyword)] if keyword == "return" => {
+            return Ok(ParsedInput::Return { value: None });
+        }
+        [Token::Word(keyword), rest @ ..] if keyword == "return" => {
+            return Ok(ParsedInput::Return {
+                value: Some(parse_expression(rest)?),
+            });
+        }
         [Token::Word(name), Token::Assign, rest @ ..] if name.starts_with("env.") => {
             return parse_environment_assignment(name, rest);
         }
@@ -359,6 +398,104 @@ fn parse_for(input: &str) -> Result<ParsedInput, ParseError> {
     })
 }
 
+fn parse_function(input: &str) -> Result<ParsedInput, ParseError> {
+    let lines = normalized_lines(input);
+    let Some(header) = lines.first() else {
+        return Err(ParseError::EmptyCommand);
+    };
+
+    let header = header
+        .strip_prefix("fn ")
+        .and_then(|line| line.strip_suffix('{'))
+        .map(str::trim)
+        .ok_or(ParseError::MissingBlockStart)?;
+    let open_paren = header.find('(').ok_or(ParseError::MissingParameterList)?;
+    let close_paren = header.rfind(')').ok_or(ParseError::MissingParameterList)?;
+
+    if close_paren < open_paren {
+        return Err(ParseError::MissingParameterList);
+    }
+
+    let name = header[..open_paren].trim();
+
+    if name.is_empty() {
+        return Err(ParseError::MissingFunctionName);
+    }
+
+    if !is_valid_identifier(name) {
+        return Err(ParseError::InvalidVariableName(name.into()));
+    }
+
+    if is_reserved_name(name) {
+        return Err(ParseError::ReservedName(name.into()));
+    }
+
+    let params = parse_function_params(&header[open_paren + 1..close_paren])?;
+    let return_type = parse_function_return_type(header[close_paren + 1..].trim())?;
+    let (body, _) = parse_block_body(&lines, 1)?;
+
+    Ok(ParsedInput::FunctionDefinition {
+        name: name.into(),
+        definition: FunctionDefinition {
+            params,
+            return_type,
+            body,
+        },
+    })
+}
+
+fn parse_function_params(input: &str) -> Result<Vec<FunctionParam>, ParseError> {
+    let input = input.trim();
+
+    if input.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    input
+        .split(',')
+        .map(|param| {
+            let Some((name, type_name)) = param.trim().split_once(':') else {
+                return Err(ParseError::MissingParameterList);
+            };
+            let name = name.trim();
+            let type_name = type_name.trim();
+
+            if !is_valid_identifier(name) {
+                return Err(ParseError::InvalidVariableName(name.into()));
+            }
+
+            if is_reserved_name(name) {
+                return Err(ParseError::ReservedName(name.into()));
+            }
+
+            let Some(type_name) = TypeName::parse(type_name) else {
+                return Err(ParseError::InvalidTypeName(type_name.into()));
+            };
+
+            Ok(FunctionParam {
+                name: name.into(),
+                type_name,
+            })
+        })
+        .collect()
+}
+
+fn parse_function_return_type(input: &str) -> Result<Option<TypeName>, ParseError> {
+    if input.is_empty() {
+        return Ok(None);
+    }
+
+    let Some(type_name) = input.strip_prefix("->").map(str::trim) else {
+        return Err(ParseError::MissingReturnType);
+    };
+
+    let Some(type_name) = TypeName::parse(type_name) else {
+        return Err(ParseError::InvalidTypeName(type_name.into()));
+    };
+
+    Ok(Some(type_name))
+}
+
 fn parse_iterable(input: &str) -> Result<Iterable, ParseError> {
     if let Some((start, end)) = input.split_once("..=") {
         return Ok(Iterable::Range {
@@ -415,7 +552,8 @@ fn starts_block_statement(line: &str) -> bool {
     (line.starts_with("if ")
         || line.starts_with("match ")
         || line.starts_with("while ")
-        || line.starts_with("for "))
+        || line.starts_with("for ")
+        || line.starts_with("fn "))
         && line.ends_with('{')
 }
 
@@ -783,7 +921,41 @@ impl<'a> ExpressionParser<'a> {
             return Err(ParseError::MissingAssignmentValue);
         };
 
+        if let Token::Word(name) = token
+            && matches!(self.peek(), Some(Token::LeftParen))
+        {
+            self.position += 1;
+            return self.parse_call(name.clone());
+        }
+
         token_to_expression(token).ok_or_else(|| ParseError::UnexpectedToken(token.clone()))
+    }
+
+    fn parse_call(&mut self, name: String) -> Result<Expression, ParseError> {
+        let mut args = Vec::new();
+
+        if matches!(self.peek(), Some(Token::RightParen)) {
+            self.position += 1;
+            return Ok(Expression::Call { name, args });
+        }
+
+        loop {
+            args.push(self.parse_equality()?);
+
+            match self.peek() {
+                Some(Token::Comma) => {
+                    self.position += 1;
+                }
+                Some(Token::RightParen) => {
+                    self.position += 1;
+                    break;
+                }
+                Some(token) => return Err(ParseError::UnexpectedToken(token.clone())),
+                None => return Err(ParseError::UnexpectedToken(Token::LeftParen)),
+            }
+        }
+
+        Ok(Expression::Call { name, args })
     }
 
     fn match_equality_operator(&mut self) -> Option<BinaryOperator> {
@@ -1475,6 +1647,63 @@ for file in *.rs {
     };
 
     assert_eq!(iterable, Iterable::Glob("*.rs".into()));
+}
+
+#[test]
+fn parses_function_definition() {
+    let result = parse(
+        r#"
+fn add(a: int, b: int) -> int {
+    return a + b
+}
+"#,
+    )
+    .unwrap();
+
+    let ParsedInput::FunctionDefinition { name, definition } = result else {
+        panic!("expected function definition");
+    };
+
+    assert_eq!(name, "add");
+    assert_eq!(
+        definition.params,
+        vec![
+            FunctionParam {
+                name: "a".into(),
+                type_name: TypeName::Int,
+            },
+            FunctionParam {
+                name: "b".into(),
+                type_name: TypeName::Int,
+            },
+        ]
+    );
+    assert_eq!(definition.return_type, Some(TypeName::Int));
+    assert_eq!(definition.body.len(), 1);
+}
+
+#[test]
+fn parses_function_call_expression() {
+    let result = parse("let total = add(2, 3)");
+
+    assert_eq!(
+        result,
+        Ok(ParsedInput::Let {
+            name: "total".into(),
+            type_annotation: None,
+            value: Expression::Call {
+                name: "add".into(),
+                args: vec![Value::Int(2).into(), Value::Int(3).into()],
+            },
+        })
+    );
+}
+
+#[test]
+fn parses_return_without_value() {
+    let result = parse("return");
+
+    assert_eq!(result, Ok(ParsedInput::Return { value: None }));
 }
 
 #[test]
