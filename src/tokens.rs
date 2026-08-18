@@ -1,3 +1,5 @@
+use std::fmt;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Token {
     Word(String),
@@ -34,6 +36,16 @@ pub enum TokenizeError {
     UnterminatedSingleQuote,
     UnterminatedDoubleQuote,
     TrailingEscape,
+}
+
+impl fmt::Display for TokenizeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnterminatedSingleQuote => write!(formatter, "unterminated single quote"),
+            Self::UnterminatedDoubleQuote => write!(formatter, "unterminated double quote"),
+            Self::TrailingEscape => write!(formatter, "trailing escape"),
+        }
+    }
 }
 
 pub fn tokenize(input: &str) -> Result<Vec<Token>, TokenizeError> {
@@ -105,16 +117,19 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, TokenizeError> {
             }
 
             '=' if !in_single_quotes && !in_double_quotes => {
-                push_word(&mut tokens, &mut current, &mut quoted);
-
                 if matches!(chars.peek(), Some('>')) {
+                    push_word(&mut tokens, &mut current, &mut quoted);
                     chars.next();
                     tokens.push(Token::FatArrow);
                 } else if matches!(chars.peek(), Some('=')) {
+                    push_word(&mut tokens, &mut current, &mut quoted);
                     chars.next();
                     tokens.push(Token::Equal);
-                } else {
+                } else if current.is_empty() && is_separated_operator(chars.peek()) {
+                    push_word(&mut tokens, &mut current, &mut quoted);
                     tokens.push(Token::Assign);
+                } else {
+                    current.push(ch);
                 }
             }
 
@@ -223,17 +238,19 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, TokenizeError> {
 }
 
 fn push_word(tokens: &mut Vec<Token>, current: &mut String, quoted: &mut bool) {
-    if !current.is_empty() {
-        let value = std::mem::take(current);
-
-        if *quoted {
-            tokens.push(Token::StringLiteral(value));
-        } else {
-            tokens.push(classify_word(value));
-        }
-
-        *quoted = false;
+    if current.is_empty() && !*quoted {
+        return;
     }
+
+    let value = std::mem::take(current);
+
+    if *quoted {
+        tokens.push(Token::StringLiteral(value));
+    } else {
+        tokens.push(classify_word(value));
+    }
+
+    *quoted = false;
 }
 
 fn classify_word(value: String) -> Token {
@@ -410,6 +427,32 @@ mod tests {
                 Token::IntLiteral(5),
                 Token::Equal,
                 Token::BoolLiteral(true),
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_joined_assignment_as_word_content() {
+        let tokens = tokenize("ls --color=auto").unwrap();
+
+        assert_eq!(
+            tokens,
+            vec![Token::Word("ls".into()), Token::Word("--color=auto".into()),]
+        );
+    }
+
+    #[test]
+    fn preserves_empty_quoted_strings() {
+        assert_eq!(
+            tokenize(r#"print """#).unwrap(),
+            vec![Token::Word("print".into()), Token::StringLiteral("".into())]
+        );
+        assert_eq!(
+            tokenize(r#"print "" hello"#).unwrap(),
+            vec![
+                Token::Word("print".into()),
+                Token::StringLiteral("".into()),
+                Token::Word("hello".into()),
             ]
         );
     }

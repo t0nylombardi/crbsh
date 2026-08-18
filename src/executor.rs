@@ -1,5 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Stdio};
 
 use crate::builtins;
@@ -23,8 +24,9 @@ pub fn execute_pipeline(shell: &Shell, pipeline: &Pipeline) -> Result<i32, Execu
         return execute_single_external(shell, command);
     }
 
-    let mut children = Vec::new();
+    let mut children = ChildCleanup::new();
     let mut initial_input = None;
+    let mut initial_stdin = None;
     let mut previous_stdout = None;
     let start_index = match pipeline.commands.first() {
         Some(command) if command.name == "print" => {
@@ -36,45 +38,70 @@ pub fn execute_pipeline(shell: &Shell, pipeline: &Pipeline) -> Result<i32, Execu
     let last_index = pipeline.commands.len().saturating_sub(1);
 
     for (index, command) in pipeline.commands.iter().enumerate().skip(start_index) {
+        let uses_initial_input = initial_input.is_some() && index == start_index;
+
+        if shell.builtins.get(&command.name).is_some() {
+            return Err(ExecutionError {
+                command: command.name.clone(),
+                message: "builtins are not supported in this pipeline position".into(),
+            });
+        }
+
         let mut process = Command::new(&command.name);
-        process
-            .args(resolved_args(shell, command)?)
-            .envs(shell.environment_overrides());
+        let args = match resolved_args(shell, command) {
+            Ok(args) => args,
+            Err(err) => {
+                children.cleanup();
+                return Err(err);
+            }
+        };
+
+        process.args(args).envs(shell.environment_overrides());
 
         if let Some(path) = &command.redirections.stdin {
-            let input = File::open(path).map_err(|source| ExecutionError {
-                command: command.name.clone(),
-                message: source.to_string(),
-            })?;
+            let input = match File::open(path) {
+                Ok(input) => input,
+                Err(source) => {
+                    children.cleanup();
+                    return Err(ExecutionError {
+                        command: command.name.clone(),
+                        message: source.to_string(),
+                    });
+                }
+            };
             process.stdin(Stdio::from(input));
-        } else if initial_input.is_some() {
+        } else if uses_initial_input {
             process.stdin(Stdio::piped());
         } else if let Some(stdout) = previous_stdout.take() {
             process.stdin(Stdio::from(stdout));
         }
 
         if let Some(output) = command.redirections.stdout.as_ref() {
-            process.stdout(Stdio::from(output_file(
-                command,
-                &output.target,
-                output.append,
-            )?));
+            let output = match output_file(command, &output.target, output.append) {
+                Ok(output) => output,
+                Err(err) => {
+                    children.cleanup();
+                    return Err(err);
+                }
+            };
+            process.stdout(Stdio::from(output));
         } else if index != last_index {
             process.stdout(Stdio::piped());
         }
 
-        let mut child = process.spawn().map_err(|source| ExecutionError {
-            command: command.name.clone(),
-            message: source.to_string(),
-        })?;
+        let mut child = match process.spawn() {
+            Ok(child) => child,
+            Err(source) => {
+                children.cleanup();
+                return Err(ExecutionError {
+                    command: command.name.clone(),
+                    message: source.to_string(),
+                });
+            }
+        };
 
-        if let Some(input) = initial_input.take()
-            && let Some(mut stdin) = child.stdin.take()
-        {
-            stdin.write_all(&input).map_err(|source| ExecutionError {
-                command: command.name.clone(),
-                message: source.to_string(),
-            })?;
+        if uses_initial_input {
+            initial_stdin = child.stdin.take();
         }
 
         if index != last_index {
@@ -84,17 +111,68 @@ pub fn execute_pipeline(shell: &Shell, pipeline: &Pipeline) -> Result<i32, Execu
         children.push(child);
     }
 
+    if let Some(input) = initial_input.take()
+        && let Some(mut stdin) = initial_stdin.take()
+        && let Err(source) = stdin.write_all(&input)
+    {
+        children.cleanup();
+        return Err(ExecutionError {
+            command: "<pipeline>".into(),
+            message: source.to_string(),
+        });
+    }
+
     let mut exit_code = 0;
 
-    for mut child in children {
+    for mut child in children.into_children() {
         let status = child.wait().map_err(|source| ExecutionError {
             command: "<pipeline>".into(),
             message: source.to_string(),
         })?;
-        exit_code = status.code().unwrap_or(1);
+        exit_code = status_exit_code(status);
     }
 
     Ok(exit_code)
+}
+
+struct ChildCleanup {
+    children: Vec<std::process::Child>,
+}
+
+impl ChildCleanup {
+    fn new() -> Self {
+        Self {
+            children: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, child: std::process::Child) {
+        self.children.push(child);
+    }
+
+    fn cleanup(&mut self) {
+        for child in &mut self.children {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    fn into_children(mut self) -> Vec<std::process::Child> {
+        std::mem::take(&mut self.children)
+    }
+}
+
+impl Drop for ChildCleanup {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
+fn status_exit_code(status: std::process::ExitStatus) -> i32 {
+    status
+        .code()
+        .or_else(|| status.signal().map(|signal| 128 + signal))
+        .unwrap_or(1)
 }
 
 fn execute_single_external(shell: &Shell, command: &ParsedCommand) -> Result<i32, ExecutionError> {
@@ -124,7 +202,7 @@ fn execute_single_external(shell: &Shell, command: &ParsedCommand) -> Result<i32
         message: source.to_string(),
     })?;
 
-    Ok(status.code().unwrap_or(1))
+    Ok(status_exit_code(status))
 }
 
 fn execute_print(shell: &Shell, command: &ParsedCommand) -> Result<i32, ExecutionError> {
@@ -185,13 +263,14 @@ impl From<ShellError> for ExecutionError {
 mod tests {
     use std::fs;
     use std::path::PathBuf;
+    use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::parser::{OutputRedirection, ParsedCommand, Pipeline, Redirections};
     use crate::shell::Shell;
     use crate::value::Value;
 
-    use super::execute_pipeline;
+    use super::{execute_pipeline, status_exit_code};
 
     #[test]
     fn redirects_print_output_to_file() {
@@ -503,7 +582,81 @@ mod tests {
         assert_eq!(last_failure_code, 1);
     }
 
-    fn temp_dir(test_name: &str) -> PathBuf {
+    #[test]
+    fn reports_missing_command_failure() {
+        let shell = Shell::new();
+        let error = execute_pipeline(
+            &shell,
+            &Pipeline {
+                commands: vec![ParsedCommand {
+                    name: "crbsh-definitely-missing-command".into(),
+                    args: Vec::new(),
+                    redirections: Redirections::default(),
+                }],
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.command, "crbsh-definitely-missing-command");
+        assert!(!error.message.is_empty());
+    }
+
+    #[test]
+    fn rejects_builtin_in_non_leading_pipeline_position() {
+        let shell = Shell::new();
+        let error = execute_pipeline(
+            &shell,
+            &Pipeline {
+                commands: vec![
+                    ParsedCommand {
+                        name: "true".into(),
+                        args: Vec::new(),
+                        redirections: Redirections::default(),
+                    },
+                    ParsedCommand {
+                        name: "print".into(),
+                        args: Vec::new(),
+                        redirections: Redirections::default(),
+                    },
+                ],
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.command, "print");
+        assert_eq!(
+            error.message,
+            "builtins are not supported in this pipeline position"
+        );
+    }
+
+    #[test]
+    fn signal_status_maps_to_128_plus_signal() {
+        let mut child = Command::new("sleep").arg("10").spawn().unwrap();
+
+        child.kill().unwrap();
+        let status = child.wait().unwrap();
+
+        assert_eq!(status_exit_code(status), 137);
+    }
+
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn join(&self, path: &str) -> PathBuf {
+            self.path.join(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn temp_dir(test_name: &str) -> TempDir {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -512,6 +665,6 @@ mod tests {
 
         fs::create_dir(&dir).unwrap();
 
-        dir
+        TempDir { path: dir }
     }
 }

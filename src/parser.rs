@@ -1,3 +1,5 @@
+use std::fmt;
+
 use crate::tokens::{Token, TokenizeError, tokenize};
 use crate::value::{TypeName, Value};
 
@@ -191,6 +193,7 @@ pub enum ParseError {
     MissingAssignmentValue,
     MissingFunctionName,
     MissingParameterList,
+    MissingBlockEnd,
     MissingRedirectionTarget,
     MissingReturnType,
     MissingMatchArrow,
@@ -203,6 +206,44 @@ pub enum ParseError {
 impl From<TokenizeError> for ParseError {
     fn from(error: TokenizeError) -> Self {
         Self::Tokenize(error)
+    }
+}
+
+impl fmt::Display for ParseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Tokenize(error) => write!(formatter, "{error}"),
+            Self::EmptyCommand => write!(formatter, "empty command"),
+            Self::ExpectedAssignmentOperator => write!(formatter, "expected '='"),
+            Self::InvalidEnvironmentName(name) => {
+                write!(formatter, "invalid environment variable name '{name}'")
+            }
+            Self::InvalidTypeName(name) => write!(formatter, "invalid type name '{name}'"),
+            Self::InvalidVariableName(name) => write!(formatter, "invalid variable name '{name}'"),
+            Self::InvalidIterable(value) => write!(formatter, "invalid iterable '{value}'"),
+            Self::MissingBlockStart => write!(formatter, "missing block start '{{'"),
+            Self::MissingAssignmentValue => write!(formatter, "missing assignment value"),
+            Self::MissingFunctionName => write!(formatter, "missing function name"),
+            Self::MissingParameterList => write!(formatter, "missing parameter list"),
+            Self::MissingBlockEnd => write!(formatter, "missing block end '}}'"),
+            Self::MissingRedirectionTarget => write!(formatter, "missing redirection target"),
+            Self::MissingReturnType => write!(formatter, "missing return type"),
+            Self::MissingMatchArrow => write!(formatter, "missing match arrow '=>'"),
+            Self::MissingMatchPattern => write!(formatter, "missing match pattern"),
+            Self::ReservedName(name) => {
+                write!(formatter, "cannot assign to reserved name '{name}'")
+            }
+            Self::UnsupportedRedirection(token) => {
+                write!(
+                    formatter,
+                    "unsupported redirection near {}",
+                    token_description(token)
+                )
+            }
+            Self::UnexpectedToken(token) => {
+                write!(formatter, "unexpected token {}", token_description(token))
+            }
+        }
     }
 }
 
@@ -250,6 +291,10 @@ pub fn parse(input: &str) -> Result<ParsedInput, ParseError> {
             });
         }
         [Token::Word(name), Token::Assign, rest @ ..] if name.starts_with("env.") => {
+            let Some(name) = name.strip_prefix("env.") else {
+                return Err(ParseError::UnexpectedToken(Token::Word(name.clone())));
+            };
+
             return parse_environment_assignment(name, rest);
         }
         [Token::Word(name), Token::Assign, rest @ ..] if is_valid_identifier(name) => {
@@ -357,7 +402,8 @@ fn parse_while(input: &str) -> Result<ParsedInput, ParseError> {
         .and_then(|line| line.strip_suffix('{'))
         .map(str::trim)
         .ok_or(ParseError::MissingBlockStart)?;
-    let (body, _) = parse_block_body(&lines, 1)?;
+    let (body, end_index) = parse_block_body(&lines, 1)?;
+    ensure_block_consumed(&lines, end_index)?;
 
     Ok(ParsedInput::While {
         condition: parse_expression_from_source(condition_source)?,
@@ -389,7 +435,8 @@ fn parse_for(input: &str) -> Result<ParsedInput, ParseError> {
         return Err(ParseError::ReservedName(name.into()));
     }
 
-    let (body, _) = parse_block_body(&lines, 1)?;
+    let (body, end_index) = parse_block_body(&lines, 1)?;
+    ensure_block_consumed(&lines, end_index)?;
 
     Ok(ParsedInput::For {
         name: name.into(),
@@ -432,7 +479,8 @@ fn parse_function(input: &str) -> Result<ParsedInput, ParseError> {
 
     let params = parse_function_params(&header[open_paren + 1..close_paren])?;
     let return_type = parse_function_return_type(header[close_paren + 1..].trim())?;
-    let (body, _) = parse_block_body(&lines, 1)?;
+    let (body, end_index) = parse_block_body(&lines, 1)?;
+    ensure_block_consumed(&lines, end_index)?;
 
     Ok(ParsedInput::FunctionDefinition {
         name: name.into(),
@@ -442,6 +490,20 @@ fn parse_function(input: &str) -> Result<ParsedInput, ParseError> {
             body,
         },
     })
+}
+
+fn ensure_block_consumed(lines: &[&str], end_index: usize) -> Result<(), ParseError> {
+    if end_index >= lines.len() {
+        return Err(ParseError::MissingBlockEnd);
+    }
+
+    if end_index + 1 < lines.len() {
+        return Err(ParseError::UnexpectedToken(Token::Word(
+            lines[end_index + 1].into(),
+        )));
+    }
+
+    Ok(())
 }
 
 fn parse_function_params(input: &str) -> Result<Vec<FunctionParam>, ParseError> {
@@ -693,10 +755,6 @@ fn parse_assignment(name: &str, rest: &[Token]) -> Result<ParsedInput, ParseErro
 }
 
 fn parse_environment_assignment(name: &str, rest: &[Token]) -> Result<ParsedInput, ParseError> {
-    let Some(name) = name.strip_prefix("env.") else {
-        unreachable!("environment assignments are prefiltered by prefix");
-    };
-
     if !is_valid_environment_name(name) {
         return Err(ParseError::InvalidEnvironmentName(name.into()));
     }
@@ -774,8 +832,9 @@ fn parse_pipeline(tokens: Vec<Token>) -> Result<Pipeline, ParseError> {
             | Token::LessEqual
             | Token::GreaterEqual => {
                 if current.is_none() {
-                    let name = token_to_command_name(&token)
-                        .expect("word, literal, and operator tokens map to command names");
+                    let Some(name) = token_to_command_name(&token) else {
+                        return Err(ParseError::UnexpectedToken(token));
+                    };
                     current = Some(ParsedCommand {
                         name,
                         args: Vec::new(),
@@ -784,12 +843,12 @@ fn parse_pipeline(tokens: Vec<Token>) -> Result<Pipeline, ParseError> {
                     continue;
                 }
 
-                let expression = token_to_command_argument(&token)
-                    .expect("word, literal, and operator tokens map to command arguments");
+                let Some(expression) = token_to_command_argument(&token) else {
+                    return Err(ParseError::UnexpectedToken(token));
+                };
 
-                match &mut current {
-                    Some(command) => command.args.push(expression),
-                    None => unreachable!("current command was initialized above"),
+                if let Some(command) = current.as_mut() {
+                    command.args.push(expression);
                 }
             }
 
@@ -1131,11 +1190,37 @@ fn token_to_operator_string(token: &Token) -> Option<&'static str> {
 }
 
 pub fn format_error(error: &ParseError) -> String {
-    match error {
-        ParseError::ReservedName(name) => {
-            format!("cannot assign to reserved name '{name}'")
-        }
-        _ => format!("parse error: {error:?}"),
+    error.to_string()
+}
+
+fn token_description(token: &Token) -> String {
+    match token {
+        Token::Word(value) | Token::StringLiteral(value) => format!("'{value}'"),
+        Token::IntLiteral(value) => format!("'{value}'"),
+        Token::BoolLiteral(value) => format!("'{value}'"),
+        Token::Assign => "'='".into(),
+        Token::Equal => "'=='".into(),
+        Token::NotEqual => "'!='".into(),
+        Token::FatArrow => "'=>'".into(),
+        Token::Arrow => "'->'".into(),
+        Token::Colon => "':'".into(),
+        Token::Comma => "','".into(),
+        Token::Plus => "'+'".into(),
+        Token::Minus => "'-'".into(),
+        Token::Star => "'*'".into(),
+        Token::Slash => "'/'".into(),
+        Token::LeftParen => "'('".into(),
+        Token::RightParen => "')'".into(),
+        Token::LessEqual => "'<='".into(),
+        Token::GreaterEqual => "'>='".into(),
+        Token::LeftBrace => "'{'".into(),
+        Token::RightBrace => "'}'".into(),
+        Token::Wildcard => "'_'".into(),
+        Token::Pipe => "'|'".into(),
+        Token::RedirectOut => "'>'".into(),
+        Token::RedirectAppend => "'>>'".into(),
+        Token::RedirectIn => "'<'".into(),
+        Token::Background => "'&'".into(),
     }
 }
 
@@ -1165,6 +1250,41 @@ fn parses_quoted_command_argument_as_literal() {
             commands: vec![ParsedCommand {
                 name: "print".into(),
                 args: vec![Value::String("project".into()).into()],
+                redirections: Redirections::default(),
+            }],
+        }))
+    );
+}
+
+#[test]
+fn parses_empty_quoted_command_argument_as_literal() {
+    let result = parse(r#"print "" hello"#);
+
+    assert_eq!(
+        result,
+        Ok(ParsedInput::Pipeline(Pipeline {
+            commands: vec![ParsedCommand {
+                name: "print".into(),
+                args: vec![
+                    Expression::Literal(Value::String("".into())),
+                    "hello".into(),
+                ],
+                redirections: Redirections::default(),
+            }],
+        }))
+    );
+}
+
+#[test]
+fn keeps_joined_assignment_in_command_argument() {
+    let result = parse("ls --color=auto");
+
+    assert_eq!(
+        result,
+        Ok(ParsedInput::Pipeline(Pipeline {
+            commands: vec![ParsedCommand {
+                name: "ls".into(),
+                args: vec![Expression::Identifier("--color=auto".into())],
                 redirections: Redirections::default(),
             }],
         }))
@@ -1552,6 +1672,37 @@ while retries < 3 {
 }
 
 #[test]
+fn rejects_unterminated_while_block() {
+    let result = parse(
+        r#"
+while true {
+    print "forever"
+"#,
+    );
+
+    assert_eq!(result, Err(ParseError::MissingBlockEnd));
+}
+
+#[test]
+fn rejects_trailing_lines_after_while_block() {
+    let result = parse(
+        r#"
+while false {
+    print "never"
+}
+print "after"
+"#,
+    );
+
+    assert_eq!(
+        result,
+        Err(ParseError::UnexpectedToken(Token::Word(
+            r#"print "after""#.into()
+        )))
+    );
+}
+
+#[test]
 fn parses_while_block_with_nested_break() {
     let result = parse(
         r#"
@@ -1632,6 +1783,18 @@ for i in 0..=10 {
 }
 
 #[test]
+fn rejects_unterminated_for_block() {
+    let result = parse(
+        r#"
+for i in 0..3 {
+    print i
+"#,
+    );
+
+    assert_eq!(result, Err(ParseError::MissingBlockEnd));
+}
+
+#[test]
 fn parses_for_glob() {
     let result = parse(
         r#"
@@ -1680,6 +1843,25 @@ fn add(a: int, b: int) -> int {
     );
     assert_eq!(definition.return_type, Some(TypeName::Int));
     assert_eq!(definition.body.len(), 1);
+}
+
+#[test]
+fn rejects_trailing_lines_after_function_block() {
+    let result = parse(
+        r#"
+fn greet(name: string) {
+    print name
+}
+print "after"
+"#,
+    );
+
+    assert_eq!(
+        result,
+        Err(ParseError::UnexpectedToken(Token::Word(
+            r#"print "after""#.into()
+        )))
+    );
 }
 
 #[test]

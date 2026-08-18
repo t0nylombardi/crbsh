@@ -8,8 +8,10 @@ use crate::value::{TypeName, Value};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShellError {
     DivisionByZero,
+    IntegerOverflow,
     UndefinedVariable(String),
     UndefinedEnvironmentVariable(String),
+    UnsupportedCall(String),
     UnsupportedOperator {
         operator: BinaryOperator,
         left: TypeName,
@@ -50,6 +52,16 @@ impl Shell {
         if self.scopes.len() > 1 {
             self.scopes.pop();
         }
+    }
+
+    pub fn isolate_function_scopes(&mut self) -> Vec<HashMap<String, Value>> {
+        let global_scope = self.scopes.first().cloned().unwrap_or_default();
+
+        std::mem::replace(&mut self.scopes, vec![global_scope, HashMap::new()])
+    }
+
+    pub fn restore_scopes(&mut self, scopes: Vec<HashMap<String, Value>>) {
+        self.scopes = scopes;
     }
 
     pub fn declare_variable(
@@ -137,9 +149,9 @@ impl Shell {
                 let left = self.evaluate(left)?;
                 let right = self.evaluate(right)?;
 
-                Self::evaluate_binary(*operator, left, right)
+                evaluate_binary(*operator, left, right)
             }
-            Expression::Call { name, .. } => Err(ShellError::UndefinedVariable(name.clone())),
+            Expression::Call { name, .. } => Err(ShellError::UnsupportedCall(name.clone())),
         }
     }
 
@@ -175,14 +187,6 @@ impl Shell {
             .or_else(|| std::env::var(name).ok())
     }
 
-    pub fn evaluate_binary(
-        operator: BinaryOperator,
-        left: Value,
-        right: Value,
-    ) -> Result<Value, ShellError> {
-        evaluate_binary(operator, left, right)
-    }
-
     fn current_scope_mut(&mut self) -> &mut HashMap<String, Value> {
         self.scopes
             .last_mut()
@@ -208,9 +212,16 @@ impl fmt::Display for ShellError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::DivisionByZero => write!(formatter, "division by zero"),
+            Self::IntegerOverflow => write!(formatter, "integer overflow"),
             Self::UndefinedVariable(name) => write!(formatter, "undefined variable '{name}'"),
             Self::UndefinedEnvironmentVariable(name) => {
                 write!(formatter, "undefined environment variable '{name}'")
+            }
+            Self::UnsupportedCall(name) => {
+                write!(
+                    formatter,
+                    "function call '{name}' is not supported in this evaluation context"
+                )
             }
             Self::UnsupportedOperator {
                 operator,
@@ -235,23 +246,29 @@ impl fmt::Display for ShellError {
     }
 }
 
-fn evaluate_binary(
+pub fn evaluate_binary(
     operator: BinaryOperator,
     left: Value,
     right: Value,
 ) -> Result<Value, ShellError> {
     match (operator, left, right) {
-        (BinaryOperator::Add, Value::Int(left), Value::Int(right)) => Ok(Value::Int(left + right)),
-        (BinaryOperator::Subtract, Value::Int(left), Value::Int(right)) => {
-            Ok(Value::Int(left - right))
-        }
-        (BinaryOperator::Multiply, Value::Int(left), Value::Int(right)) => {
-            Ok(Value::Int(left * right))
-        }
+        (BinaryOperator::Add, Value::Int(left), Value::Int(right)) => left
+            .checked_add(right)
+            .map(Value::Int)
+            .ok_or(ShellError::IntegerOverflow),
+        (BinaryOperator::Subtract, Value::Int(left), Value::Int(right)) => left
+            .checked_sub(right)
+            .map(Value::Int)
+            .ok_or(ShellError::IntegerOverflow),
+        (BinaryOperator::Multiply, Value::Int(left), Value::Int(right)) => left
+            .checked_mul(right)
+            .map(Value::Int)
+            .ok_or(ShellError::IntegerOverflow),
         (BinaryOperator::Divide, Value::Int(_), Value::Int(0)) => Err(ShellError::DivisionByZero),
-        (BinaryOperator::Divide, Value::Int(left), Value::Int(right)) => {
-            Ok(Value::Int(left / right))
-        }
+        (BinaryOperator::Divide, Value::Int(left), Value::Int(right)) => left
+            .checked_div(right)
+            .map(Value::Int)
+            .ok_or(ShellError::IntegerOverflow),
         (BinaryOperator::Equal, left, right) if left.type_name() == right.type_name() => {
             Ok(Value::Bool(left == right))
         }
@@ -597,6 +614,41 @@ mod tests {
                 left: TypeName::String,
                 right: TypeName::Int,
             })
+        );
+    }
+
+    #[test]
+    fn reports_unsupported_call_in_shell_evaluator() {
+        let shell = Shell::new();
+
+        assert_eq!(
+            shell.evaluate(&Expression::Call {
+                name: "add".into(),
+                args: Vec::new(),
+            }),
+            Err(ShellError::UnsupportedCall("add".into()))
+        );
+    }
+
+    #[test]
+    fn rejects_integer_overflow() {
+        let shell = Shell::new();
+
+        assert_eq!(
+            shell.evaluate(&binary(
+                Value::Int(i64::MAX).into(),
+                BinaryOperator::Add,
+                Value::Int(1).into(),
+            )),
+            Err(ShellError::IntegerOverflow)
+        );
+        assert_eq!(
+            shell.evaluate(&binary(
+                Value::Int(i64::MIN).into(),
+                BinaryOperator::Divide,
+                Value::Int(-1).into(),
+            )),
+            Err(ShellError::IntegerOverflow)
         );
     }
 

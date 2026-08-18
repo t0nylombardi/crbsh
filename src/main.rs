@@ -7,7 +7,7 @@ mod tokens;
 mod value;
 
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use builtins::BuiltinOutcome;
@@ -63,10 +63,14 @@ fn run_repl(shell: &mut Shell) {
 
     loop {
         print!("{}", prompt::render());
-        io::stdout().flush().unwrap();
+        if io::stdout().flush().is_err() {
+            shell.exit_code = 1;
+            return;
+        }
 
         let input = match read_input() {
-            Ok(input) => input,
+            Ok(Some(input)) => input,
+            Ok(None) => return,
             Err(()) => continue,
         };
 
@@ -221,18 +225,29 @@ fn collect_source_statements(source: &str) -> Vec<String> {
     statements
 }
 
-fn read_input() -> Result<String, ()> {
+fn read_input() -> Result<Option<String>, ()> {
+    let stdin = io::stdin();
+    let mut stdin = stdin.lock();
+
+    read_input_from(&mut stdin)
+}
+
+fn read_input_from(reader: &mut impl BufRead) -> Result<Option<String>, ()> {
     let mut input = String::new();
 
-    if io::stdin().read_line(&mut input).is_err() {
-        return Err(());
+    match reader.read_line(&mut input) {
+        Ok(0) => return Ok(None),
+        Ok(_) => {}
+        Err(_) => return Err(()),
     }
 
     while brace_balance(&input) > 0 {
         let mut next_line = String::new();
 
-        if io::stdin().read_line(&mut next_line).is_err() {
-            return Err(());
+        match reader.read_line(&mut next_line) {
+            Ok(0) => return Ok(Some(input)),
+            Ok(_) => {}
+            Err(_) => return Err(()),
         }
 
         if next_line.is_empty() {
@@ -242,7 +257,7 @@ fn read_input() -> Result<String, ()> {
         input.push_str(&next_line);
     }
 
-    Ok(input)
+    Ok(Some(input))
 }
 
 fn brace_balance(input: &str) -> i32 {
@@ -673,11 +688,23 @@ fn set_loop_variable(shell: &mut Shell, name: &str, value: Value) -> Result<(), 
 }
 
 fn glob_values(pattern: &str) -> Vec<String> {
-    let Some((prefix, suffix)) = pattern.split_once('*') else {
+    if pattern.matches('*').count() != 1 {
+        return Vec::new();
+    }
+
+    let path = Path::new(pattern);
+    let Some(file_pattern) = path.file_name().and_then(|value| value.to_str()) else {
         return Vec::new();
     };
+    let Some((prefix, suffix)) = file_pattern.split_once('*') else {
+        return Vec::new();
+    };
+    let directory = path.parent().filter(|path| !path.as_os_str().is_empty());
+    let read_directory = directory.unwrap_or_else(|| Path::new("."));
 
-    let Ok(entries) = fs::read_dir(".") else {
+    // v1 supports a single '*' in the file-name component, for example
+    // '*.rs' or 'src/*.rs'. Recursive globs and multiple wildcards are ignored.
+    let Ok(entries) = fs::read_dir(read_directory) else {
         return Vec::new();
     };
 
@@ -685,6 +712,11 @@ fn glob_values(pattern: &str) -> Vec<String> {
         .filter_map(Result::ok)
         .filter_map(|entry| entry.file_name().into_string().ok())
         .filter(|name| name.starts_with(prefix) && name.ends_with(suffix))
+        .map(|name| {
+            directory
+                .map(|directory| directory.join(&name).to_string_lossy().into_owned())
+                .unwrap_or(name)
+        })
         .collect::<Vec<_>>();
 
     values.sort();
@@ -724,7 +756,7 @@ fn evaluate_expression(
             let left = evaluate_expression(shell, left)?;
             let right = evaluate_expression(shell, right)?;
 
-            Shell::evaluate_binary(*operator, left, right).map_err(Into::into)
+            shell::evaluate_binary(*operator, left, right).map_err(Into::into)
         }
         parser::Expression::Call { name, args } => execute_function_call(shell, name, args)
             .and_then(|value| {
@@ -756,7 +788,7 @@ fn execute_function_call(
         .map(|arg| evaluate_expression(shell, arg).map_err(|err| err.to_string()))
         .collect::<Result<Vec<_>, _>>()?;
 
-    shell.push_scope();
+    let caller_scopes = shell.isolate_function_scopes();
 
     let mut setup_error = None;
     for (param, value) in function.params.iter().zip(values) {
@@ -776,12 +808,12 @@ fn execute_function_call(
     }
 
     if let Some(err) = setup_error {
-        shell.pop_scope();
+        shell.restore_scopes(caller_scopes);
         return Err(err);
     }
 
     let flow = execute_block(shell, function.body);
-    shell.pop_scope();
+    shell.restore_scopes(caller_scopes);
 
     match flow {
         ControlFlow::Return(value) => enforce_return_type(name, function.return_type, value),
@@ -871,6 +903,33 @@ fn test(x: int) -> int {
             shell.evaluate(&Expression::Identifier("y".into())),
             Err(ShellError::UndefinedVariable(_))
         ));
+    }
+
+    #[test]
+    fn function_cannot_mutate_caller_local_scope() {
+        let mut shell = Shell::new();
+
+        run(
+            &mut shell,
+            r#"
+fn mutate() {
+    x = 99
+}
+"#,
+        );
+        shell.push_scope();
+        shell.declare_variable("x", None, Value::Int(1)).unwrap();
+
+        let result = execute_function_call(&mut shell, "mutate", &[]);
+
+        assert_eq!(result, Ok(None));
+        assert_eq!(shell.exit_code, 2);
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("x".into())),
+            Ok(Value::Int(1))
+        );
+
+        shell.pop_scope();
     }
 
     #[test]
@@ -996,6 +1055,32 @@ let total = add(2, 3)
         let mut shell = Shell::new();
 
         assert_eq!(run_script(&mut shell, "script.txt"), 2);
+    }
+
+    #[test]
+    fn read_input_reports_end_of_input() {
+        let mut input = io::Cursor::new(Vec::<u8>::new());
+
+        assert_eq!(read_input_from(&mut input), Ok(None));
+    }
+
+    #[test]
+    fn read_input_returns_partial_continuation_at_end_of_input() {
+        let mut input = io::Cursor::new(b"if true {\n".as_slice());
+
+        assert_eq!(read_input_from(&mut input), Ok(Some("if true {\n".into())));
+    }
+
+    #[test]
+    fn glob_values_honor_directory_component() {
+        let values = glob_values("src/*.rs");
+
+        assert!(values.contains(&"src/main.rs".into()));
+    }
+
+    #[test]
+    fn glob_values_reject_multiple_wildcards() {
+        assert!(glob_values("src/*/*.rs").is_empty());
     }
 
     fn run(shell: &mut Shell, input: &str) {
