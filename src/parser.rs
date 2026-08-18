@@ -103,6 +103,34 @@ pub enum ParsedInput {
         name: String,
         value: Expression,
     },
+    If {
+        branches: Vec<IfBranch>,
+        else_body: Option<Vec<ParsedInput>>,
+    },
+    Match {
+        value: Expression,
+        arms: Vec<MatchArm>,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct IfBranch {
+    pub condition: Expression,
+    pub body: Vec<ParsedInput>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct MatchArm {
+    pub pattern: MatchPattern,
+    pub body: ParsedInput,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum MatchPattern {
+    Literal(Value),
+    Identifier(String),
+    Status,
+    Wildcard,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -113,8 +141,11 @@ pub enum ParseError {
     InvalidEnvironmentName(String),
     InvalidTypeName(String),
     InvalidVariableName(String),
+    MissingBlockStart,
     MissingAssignmentValue,
     MissingRedirectionTarget,
+    MissingMatchArrow,
+    MissingMatchPattern,
     ReservedName(String),
     UnsupportedRedirection(Token),
     UnexpectedToken(Token),
@@ -127,6 +158,16 @@ impl From<TokenizeError> for ParseError {
 }
 
 pub fn parse(input: &str) -> Result<ParsedInput, ParseError> {
+    let input = input.trim();
+
+    if input.starts_with("if ") {
+        return parse_if(input);
+    }
+
+    if input.starts_with("match ") {
+        return parse_match(input);
+    }
+
     let tokens = tokenize(input)?;
 
     if tokens.is_empty() {
@@ -150,6 +191,150 @@ pub fn parse(input: &str) -> Result<ParsedInput, ParseError> {
     }
 
     parse_pipeline(tokens).map(ParsedInput::Pipeline)
+}
+
+fn parse_if(input: &str) -> Result<ParsedInput, ParseError> {
+    let lines = normalized_lines(input);
+    let mut branches = Vec::new();
+    let mut else_body = None;
+    let mut index = 0;
+
+    while index < lines.len() {
+        let line = lines[index];
+
+        if let Some(condition_source) = line
+            .strip_prefix("if ")
+            .or_else(|| line.strip_prefix("} else if "))
+        {
+            let condition_source = condition_source
+                .strip_suffix('{')
+                .map(str::trim)
+                .ok_or(ParseError::MissingBlockStart)?;
+            let (body, next_index) = parse_block_body(&lines, index + 1)?;
+
+            branches.push(IfBranch {
+                condition: parse_expression_from_source(condition_source)?,
+                body,
+            });
+            index = next_index;
+            continue;
+        }
+
+        if line == "} else {" {
+            let (body, next_index) = parse_block_body(&lines, index + 1)?;
+            else_body = Some(body);
+            index = next_index;
+            continue;
+        }
+
+        if line == "}" {
+            index += 1;
+            continue;
+        }
+
+        return Err(ParseError::UnexpectedToken(Token::Word(line.into())));
+    }
+
+    Ok(ParsedInput::If {
+        branches,
+        else_body,
+    })
+}
+
+fn parse_match(input: &str) -> Result<ParsedInput, ParseError> {
+    let lines = normalized_lines(input);
+    let Some(header) = lines.first() else {
+        return Err(ParseError::EmptyCommand);
+    };
+
+    let value_source = header
+        .strip_prefix("match ")
+        .and_then(|line| line.strip_suffix('{'))
+        .map(str::trim)
+        .ok_or(ParseError::MissingBlockStart)?;
+    let mut arms = Vec::new();
+
+    for line in lines.iter().skip(1) {
+        if *line == "}" {
+            continue;
+        }
+
+        let Some((pattern, body)) = line.split_once("=>") else {
+            return Err(ParseError::MissingMatchArrow);
+        };
+
+        let pattern = parse_match_pattern(pattern.trim())?;
+        let body = parse(body.trim())?;
+
+        arms.push(MatchArm { pattern, body });
+    }
+
+    Ok(ParsedInput::Match {
+        value: parse_expression_from_source(value_source)?,
+        arms,
+    })
+}
+
+fn parse_block_body(
+    lines: &[&str],
+    start_index: usize,
+) -> Result<(Vec<ParsedInput>, usize), ParseError> {
+    let mut body = Vec::new();
+    let mut index = start_index;
+
+    while index < lines.len() {
+        let line = lines[index];
+
+        if line == "}" || line.starts_with("} else") {
+            return Ok((body, index));
+        }
+
+        body.push(parse(line)?);
+        index += 1;
+    }
+
+    Ok((body, index))
+}
+
+fn normalized_lines(input: &str) -> Vec<&str> {
+    input
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+fn parse_expression_from_source(input: &str) -> Result<Expression, ParseError> {
+    let tokens = tokenize(input)?;
+
+    parse_expression(&tokens)
+}
+
+fn parse_match_pattern(input: &str) -> Result<MatchPattern, ParseError> {
+    let tokens = tokenize(input)?;
+
+    let [token] = tokens.as_slice() else {
+        if tokens.is_empty() {
+            return Err(ParseError::MissingMatchPattern);
+        }
+
+        return Err(ParseError::UnexpectedToken(
+            tokens
+                .first()
+                .cloned()
+                .unwrap_or_else(|| Token::Word(input.into())),
+        ));
+    };
+
+    match token {
+        Token::Wildcard => Ok(MatchPattern::Wildcard),
+        Token::StringLiteral(value) => Ok(MatchPattern::Literal(Value::String(value.clone()))),
+        Token::IntLiteral(value) => Ok(MatchPattern::Literal(Value::Int(*value))),
+        Token::BoolLiteral(value) => Ok(MatchPattern::Literal(Value::Bool(*value))),
+        Token::Word(value) if value == "status" => Ok(MatchPattern::Status),
+        Token::Word(value) => Ok(MatchPattern::Identifier(value.clone())),
+        token => Err(ParseError::UnexpectedToken(token.clone())),
+    }
 }
 
 fn parse_let(tokens: &[Token]) -> Result<ParsedInput, ParseError> {
@@ -891,6 +1076,109 @@ fn parses_equality_expression() {
             },
         })
     );
+}
+
+#[test]
+fn parses_if_else_if_else_block() {
+    let result = parse(
+        r#"
+if condition {
+    print "yep"
+} else if other_condition {
+    print "maybe"
+} else {
+    print "nope"
+}
+"#,
+    );
+
+    assert_eq!(
+        result,
+        Ok(ParsedInput::If {
+            branches: vec![
+                IfBranch {
+                    condition: Expression::Identifier("condition".into()),
+                    body: vec![ParsedInput::Pipeline(Pipeline {
+                        commands: vec![ParsedCommand {
+                            name: "print".into(),
+                            args: vec![Value::String("yep".into()).into()],
+                            redirections: Redirections::default(),
+                        }],
+                    })],
+                },
+                IfBranch {
+                    condition: Expression::Identifier("other_condition".into()),
+                    body: vec![ParsedInput::Pipeline(Pipeline {
+                        commands: vec![ParsedCommand {
+                            name: "print".into(),
+                            args: vec![Value::String("maybe".into()).into()],
+                            redirections: Redirections::default(),
+                        }],
+                    })],
+                },
+            ],
+            else_body: Some(vec![ParsedInput::Pipeline(Pipeline {
+                commands: vec![ParsedCommand {
+                    name: "print".into(),
+                    args: vec![Value::String("nope".into()).into()],
+                    redirections: Redirections::default(),
+                }],
+            })]),
+        })
+    );
+}
+
+#[test]
+fn parses_status_match_block() {
+    let result = parse(
+        r#"
+match status {
+    0 => print "success"
+    1 => print "failed"
+    _ => print "something weird happened"
+}
+"#,
+    )
+    .unwrap();
+
+    let ParsedInput::Match { value, arms } = result else {
+        panic!("expected match");
+    };
+
+    assert_eq!(value, Expression::Status);
+    assert_eq!(arms.len(), 3);
+    assert_eq!(arms[0].pattern, MatchPattern::Literal(Value::Int(0)));
+    assert_eq!(arms[1].pattern, MatchPattern::Literal(Value::Int(1)));
+    assert_eq!(arms[2].pattern, MatchPattern::Wildcard);
+}
+
+#[test]
+fn parses_native_value_match_block() {
+    let result = parse(
+        r#"
+match environment {
+    "development" => print "dev mode"
+    "production" => print "prod mode"
+    _ => print "unknown environment"
+}
+"#,
+    )
+    .unwrap();
+
+    let ParsedInput::Match { value, arms } = result else {
+        panic!("expected match");
+    };
+
+    assert_eq!(value, Expression::Identifier("environment".into()));
+    assert_eq!(
+        arms[0].pattern,
+        MatchPattern::Literal(Value::String("development".into()))
+    );
+    assert_eq!(
+        arms[1].pattern,
+        MatchPattern::Literal(Value::String("production".into()))
+    );
+    assert_eq!(arms[2].pattern, MatchPattern::Wildcard);
 }
 
 #[test]

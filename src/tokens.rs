@@ -7,6 +7,7 @@ pub enum Token {
     Assign,
     Equal,
     NotEqual,
+    FatArrow,
     Colon,
     Plus,
     Minus,
@@ -14,6 +15,9 @@ pub enum Token {
     Slash,
     LessEqual,
     GreaterEqual,
+    LeftBrace,
+    RightBrace,
+    Wildcard,
     Pipe,
     RedirectOut,
     RedirectAppend,
@@ -99,12 +103,25 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, TokenizeError> {
             '=' if !in_single_quotes && !in_double_quotes => {
                 push_word(&mut tokens, &mut current, &mut quoted);
 
-                if matches!(chars.peek(), Some('=')) {
+                if matches!(chars.peek(), Some('>')) {
+                    chars.next();
+                    tokens.push(Token::FatArrow);
+                } else if matches!(chars.peek(), Some('=')) {
                     chars.next();
                     tokens.push(Token::Equal);
                 } else {
                     tokens.push(Token::Assign);
                 }
+            }
+
+            '{' if !in_single_quotes && !in_double_quotes => {
+                push_word(&mut tokens, &mut current, &mut quoted);
+                tokens.push(Token::LeftBrace);
+            }
+
+            '}' if !in_single_quotes && !in_double_quotes => {
+                push_word(&mut tokens, &mut current, &mut quoted);
+                tokens.push(Token::RightBrace);
             }
 
             '!' if !in_single_quotes && !in_double_quotes && matches!(chars.peek(), Some('=')) => {
@@ -195,6 +212,7 @@ fn classify_word(value: String) -> Token {
     match value.as_str() {
         "true" => Token::BoolLiteral(true),
         "false" => Token::BoolLiteral(false),
+        "_" => Token::Wildcard,
         _ => value
             .parse::<i64>()
             .map(Token::IntLiteral)
@@ -364,6 +382,25 @@ mod tests {
                 Token::IntLiteral(5),
                 Token::Equal,
                 Token::BoolLiteral(true),
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenizes_blocks_and_match_arrow() {
+        let tokens = tokenize(r#"match status { _ => print "unknown" }"#).unwrap();
+
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Word("match".into()),
+                Token::Word("status".into()),
+                Token::LeftBrace,
+                Token::Wildcard,
+                Token::FatArrow,
+                Token::Word("print".into()),
+                Token::StringLiteral("unknown".into()),
+                Token::RightBrace,
             ]
         );
     }
