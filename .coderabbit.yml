@@ -1,0 +1,36 @@
+language: "en-US"
+tone_instructions: "Be direct, pragmatic, and focus on correctness, maintainability, and test coverage."
+
+reviews:
+  profile: "chill"
+  request_changes_workflow: false
+  high_level_summary: true
+  review_status: true
+  review_details: true
+  collapse_walkthrough: true
+  changed_files_summary: true
+  sequence_diagrams: false
+  estimate_code_review_effort: true
+  auto_review:
+    enabled: true
+    drafts: false
+    auto_incremental_review: true
+  path_filters:
+    - "!target/**"
+  path_instructions:
+    - path: "src/**/*.rs"
+      instructions: |
+        Review this as a Rust shell implementation. Pay close attention to parser/tokenizer/executor separation, ownership of shell state, exit-status semantics, error handling, and tests for user-facing language behavior.
+    - path: "src/parser.rs"
+      instructions: |
+        Verify grammar changes produce structured AST nodes and do not execute commands or encode runtime behavior in the parser.
+    - path: "src/executor.rs"
+      instructions: |
+        Verify external execution never delegates command interpretation to sh, bash, zsh, fish, or another shell. Prefer Command::new(...).args(...), explicit stdio wiring, and clear propagation of OS errors.
+
+chat:
+  auto_reply: true
+
+tools:
+  clippy:
+    enabled: true
