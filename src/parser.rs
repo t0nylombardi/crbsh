@@ -1,10 +1,31 @@
 use crate::tokens::{Token, TokenizeError, tokenize};
+use crate::value::{TypeName, Value};
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ParsedCommand {
     pub name: String,
-    pub args: Vec<String>,
+    pub args: Vec<Expression>,
     pub redirections: Redirections,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Expression {
+    Literal(Value),
+    Identifier(String),
+    EnvironmentVariable(String),
+    Status,
+}
+
+impl From<&str> for Expression {
+    fn from(value: &str) -> Self {
+        word_to_expression(value.into())
+    }
+}
+
+impl From<Value> for Expression {
+    fn from(value: Value) -> Self {
+        Self::Literal(value)
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -33,8 +54,19 @@ pub struct Pipeline {
 #[derive(Debug, PartialEq, Eq)]
 pub enum ParsedInput {
     Pipeline(Pipeline),
-    Let { name: String, value: String },
-    EnvironmentAssignment { name: String, value: String },
+    Let {
+        name: String,
+        type_annotation: Option<TypeName>,
+        value: Expression,
+    },
+    Assignment {
+        name: String,
+        value: Expression,
+    },
+    EnvironmentAssignment {
+        name: String,
+        value: Expression,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -43,6 +75,7 @@ pub enum ParseError {
     EmptyCommand,
     ExpectedAssignmentOperator,
     InvalidEnvironmentName(String),
+    InvalidTypeName(String),
     InvalidVariableName(String),
     MissingAssignmentValue,
     MissingRedirectionTarget,
@@ -65,16 +98,14 @@ pub fn parse(input: &str) -> Result<ParsedInput, ParseError> {
     }
 
     match tokens.as_slice() {
-        [
-            Token::Word(keyword),
-            Token::Word(name),
-            Token::Word(operator),
-            rest @ ..,
-        ] if keyword == "let" => {
-            return parse_let(name, operator, rest);
+        [Token::Word(keyword), rest @ ..] if keyword == "let" => {
+            return parse_let(rest);
         }
-        [Token::Word(name), Token::Word(operator), rest @ ..] if name.starts_with("env.") => {
-            return parse_environment_assignment(name, operator, rest);
+        [Token::Word(name), Token::Assign, rest @ ..] if name.starts_with("env.") => {
+            return parse_environment_assignment(name, rest);
+        }
+        [Token::Word(name), Token::Assign, rest @ ..] if is_valid_identifier(name) => {
+            return parse_assignment(name, rest);
         }
         [Token::Word(name)] if name == "env." => {
             return Err(ParseError::UnexpectedToken(Token::Word(name.clone())));
@@ -85,7 +116,11 @@ pub fn parse(input: &str) -> Result<ParsedInput, ParseError> {
     parse_pipeline(tokens).map(ParsedInput::Pipeline)
 }
 
-fn parse_let(name: &str, operator: &str, rest: &[Token]) -> Result<ParsedInput, ParseError> {
+fn parse_let(tokens: &[Token]) -> Result<ParsedInput, ParseError> {
+    let Some(Token::Word(name)) = tokens.first() else {
+        return Err(ParseError::InvalidVariableName(String::new()));
+    };
+
     if !is_valid_identifier(name) {
         return Err(ParseError::InvalidVariableName(name.into()));
     }
@@ -94,19 +129,40 @@ fn parse_let(name: &str, operator: &str, rest: &[Token]) -> Result<ParsedInput, 
         return Err(ParseError::ReservedName(name.into()));
     }
 
-    let value = parse_assignment_value(operator, rest)?;
+    let (type_annotation, rest) = match &tokens[1..] {
+        [Token::Colon, Token::Word(type_name), rest @ ..] => {
+            let Some(type_name) = TypeName::parse(type_name) else {
+                return Err(ParseError::InvalidTypeName(type_name.clone()));
+            };
+
+            (Some(type_name), rest)
+        }
+        rest => (None, rest),
+    };
+
+    let value = parse_assignment_tail(rest)?;
 
     Ok(ParsedInput::Let {
+        name: name.into(),
+        type_annotation,
+        value,
+    })
+}
+
+fn parse_assignment(name: &str, rest: &[Token]) -> Result<ParsedInput, ParseError> {
+    if is_reserved_name(name) {
+        return Err(ParseError::ReservedName(name.into()));
+    }
+
+    let value = parse_assignment_value(rest)?;
+
+    Ok(ParsedInput::Assignment {
         name: name.into(),
         value,
     })
 }
 
-fn parse_environment_assignment(
-    name: &str,
-    operator: &str,
-    rest: &[Token],
-) -> Result<ParsedInput, ParseError> {
+fn parse_environment_assignment(name: &str, rest: &[Token]) -> Result<ParsedInput, ParseError> {
     let Some(name) = name.strip_prefix("env.") else {
         unreachable!("environment assignments are prefiltered by prefix");
     };
@@ -115,7 +171,7 @@ fn parse_environment_assignment(
         return Err(ParseError::InvalidEnvironmentName(name.into()));
     }
 
-    let value = parse_assignment_value(operator, rest)?;
+    let value = parse_assignment_value(rest)?;
 
     Ok(ParsedInput::EnvironmentAssignment {
         name: name.into(),
@@ -123,25 +179,28 @@ fn parse_environment_assignment(
     })
 }
 
-fn parse_assignment_value(operator: &str, rest: &[Token]) -> Result<String, ParseError> {
-    if operator != "=" {
-        return Err(ParseError::ExpectedAssignmentOperator);
-    }
-
-    if rest.is_empty() {
+fn parse_assignment_tail(tokens: &[Token]) -> Result<Expression, ParseError> {
+    if matches!(tokens, [Token::Assign]) {
         return Err(ParseError::MissingAssignmentValue);
     }
 
-    let mut words = Vec::new();
+    let [Token::Assign, value] = tokens else {
+        return Err(ParseError::ExpectedAssignmentOperator);
+    };
 
-    for token in rest {
-        match token {
-            Token::Word(value) => words.push(value.clone()),
-            token => return Err(ParseError::UnexpectedToken(token.clone())),
+    token_to_expression(value).ok_or_else(|| ParseError::UnexpectedToken(value.clone()))
+}
+
+fn parse_assignment_value(tokens: &[Token]) -> Result<Expression, ParseError> {
+    let [value] = tokens else {
+        if tokens.is_empty() {
+            return Err(ParseError::MissingAssignmentValue);
         }
-    }
 
-    Ok(words.join(" "))
+        return Err(ParseError::ExpectedAssignmentOperator);
+    };
+
+    token_to_expression(value).ok_or_else(|| ParseError::UnexpectedToken(value.clone()))
 }
 
 fn parse_pipeline(tokens: Vec<Token>) -> Result<Pipeline, ParseError> {
@@ -151,9 +210,8 @@ fn parse_pipeline(tokens: Vec<Token>) -> Result<Pipeline, ParseError> {
 
     for token in tokens {
         if let Some(redirection) = pending_redirection.take() {
-            let Token::Word(target) = token else {
-                return Err(ParseError::UnexpectedToken(token));
-            };
+            let target =
+                token_to_redirection_target(&token).ok_or(ParseError::UnexpectedToken(token))?;
 
             let command = current.as_mut().ok_or(ParseError::EmptyCommand)?;
 
@@ -168,16 +226,29 @@ fn parse_pipeline(tokens: Vec<Token>) -> Result<Pipeline, ParseError> {
         }
 
         match token {
-            Token::Word(value) => match &mut current {
-                Some(command) => command.args.push(value),
-                None => {
+            Token::Word(_)
+            | Token::StringLiteral(_)
+            | Token::IntLiteral(_)
+            | Token::BoolLiteral(_) => {
+                if current.is_none() {
+                    let name = token_to_command_name(&token)
+                        .expect("word and literal tokens map to command names");
                     current = Some(ParsedCommand {
-                        name: value,
+                        name,
                         args: Vec::new(),
                         redirections: Redirections::default(),
                     });
+                    continue;
                 }
-            },
+
+                let expression = token_to_expression(&token)
+                    .expect("word and literal tokens map to expressions");
+
+                match &mut current {
+                    Some(command) => command.args.push(expression),
+                    None => unreachable!("current command was initialized above"),
+                }
+            }
 
             Token::Pipe => match current.take() {
                 Some(command) => {
@@ -259,6 +330,50 @@ fn is_reserved_name(value: &str) -> bool {
     matches!(value, "status")
 }
 
+fn token_to_expression(token: &Token) -> Option<Expression> {
+    match token {
+        Token::Word(value) => Some(word_to_expression(value.clone())),
+        Token::StringLiteral(value) => Some(Expression::Literal(Value::String(value.clone()))),
+        Token::IntLiteral(value) => Some(Expression::Literal(Value::Int(*value))),
+        Token::BoolLiteral(value) => Some(Expression::Literal(Value::Bool(*value))),
+        _ => None,
+    }
+}
+
+fn word_to_expression(value: String) -> Expression {
+    if value == "status" {
+        return Expression::Status;
+    }
+
+    if let Some(name) = value.strip_prefix('@') {
+        return Expression::EnvironmentVariable(name.into());
+    }
+
+    if let Some(name) = value.strip_prefix("env.") {
+        return Expression::EnvironmentVariable(name.into());
+    }
+
+    Expression::Identifier(value)
+}
+
+fn token_to_redirection_target(token: &Token) -> Option<String> {
+    match token {
+        Token::Word(value) | Token::StringLiteral(value) => Some(value.clone()),
+        Token::IntLiteral(value) => Some(value.to_string()),
+        Token::BoolLiteral(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn token_to_command_name(token: &Token) -> Option<String> {
+    match token {
+        Token::Word(value) | Token::StringLiteral(value) => Some(value.clone()),
+        Token::IntLiteral(value) => Some(value.to_string()),
+        Token::BoolLiteral(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
 pub fn format_error(error: &ParseError) -> String {
     match error {
         ParseError::ReservedName(name) => {
@@ -285,6 +400,22 @@ fn parses_simple_command() {
 }
 
 #[test]
+fn parses_quoted_command_argument_as_literal() {
+    let result = parse(r#"print "project""#);
+
+    assert_eq!(
+        result,
+        Ok(ParsedInput::Pipeline(Pipeline {
+            commands: vec![ParsedCommand {
+                name: "print".into(),
+                args: vec![Value::String("project".into()).into()],
+                redirections: Redirections::default(),
+            }],
+        }))
+    );
+}
+
+#[test]
 fn parses_pipeline() {
     let result = parse("ls -la | grep rs | sort").unwrap();
 
@@ -304,6 +435,29 @@ fn parses_pipeline() {
                 },
                 ParsedCommand {
                     name: "sort".into(),
+                    args: Vec::new(),
+                    redirections: Redirections::default(),
+                },
+            ],
+        })
+    );
+}
+
+#[test]
+fn parses_boolean_words_as_command_names_in_command_position() {
+    let result = parse("true | false").unwrap();
+
+    assert_eq!(
+        result,
+        ParsedInput::Pipeline(Pipeline {
+            commands: vec![
+                ParsedCommand {
+                    name: "true".into(),
+                    args: Vec::new(),
+                    redirections: Redirections::default(),
+                },
+                ParsedCommand {
+                    name: "false".into(),
                     args: Vec::new(),
                     redirections: Redirections::default(),
                 },
@@ -396,7 +550,8 @@ fn parses_native_variable_assignment() {
         result,
         Ok(ParsedInput::Let {
             name: "project".into(),
-            value: "crbsh".into(),
+            type_annotation: None,
+            value: Value::String("crbsh".into()).into(),
         })
     );
 }
@@ -409,7 +564,49 @@ fn parses_native_integer_assignment() {
         result,
         Ok(ParsedInput::Let {
             name: "retries".into(),
-            value: "3".into(),
+            type_annotation: None,
+            value: Value::Int(3).into(),
+        })
+    );
+}
+
+#[test]
+fn parses_native_bool_assignment() {
+    let result = parse("let is_active = true");
+
+    assert_eq!(
+        result,
+        Ok(ParsedInput::Let {
+            name: "is_active".into(),
+            type_annotation: None,
+            value: Value::Bool(true).into(),
+        })
+    );
+}
+
+#[test]
+fn parses_typed_native_variable_assignment() {
+    let result = parse(r#"let project: string = "crbsh""#);
+
+    assert_eq!(
+        result,
+        Ok(ParsedInput::Let {
+            name: "project".into(),
+            type_annotation: Some(TypeName::String),
+            value: Value::String("crbsh".into()).into(),
+        })
+    );
+}
+
+#[test]
+fn parses_native_reassignment() {
+    let result = parse("retries = 5");
+
+    assert_eq!(
+        result,
+        Ok(ParsedInput::Assignment {
+            name: "retries".into(),
+            value: Value::Int(5).into(),
         })
     );
 }
@@ -422,7 +619,7 @@ fn parses_environment_assignment() {
         result,
         Ok(ParsedInput::EnvironmentAssignment {
             name: "RUST_LOG".into(),
-            value: "debug".into(),
+            value: Value::String("debug".into()).into(),
         })
     );
 }

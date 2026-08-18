@@ -4,12 +4,13 @@ mod parser;
 mod prompt;
 mod shell;
 mod tokens;
+mod value;
 
 use std::io::{self, Write};
 
 use builtins::BuiltinOutcome;
 use parser::ParsedInput;
-use shell::{NativeValue, Shell};
+use shell::Shell;
 
 fn main() {
     let mut shell = Shell::new();
@@ -41,16 +42,64 @@ fn main() {
         };
 
         let pipeline = match parsed_input {
-            ParsedInput::Let { name, value } => {
-                shell.set_variable(name, NativeValue::parse(&value));
-                shell.exit_code = 0;
+            ParsedInput::Let {
+                name,
+                type_annotation,
+                value,
+            } => {
+                let value = match shell.evaluate(&value) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        eprintln!("crbsh: {err}");
+                        shell.exit_code = 2;
+                        continue;
+                    }
+                };
+
+                match shell.declare_variable(name, type_annotation, value) {
+                    Ok(()) => shell.exit_code = 0,
+                    Err(err) => {
+                        eprintln!("crbsh: {err}");
+                        shell.exit_code = 2;
+                    }
+                }
+
+                continue;
+            }
+
+            ParsedInput::Assignment { name, value } => {
+                let value = match shell.evaluate(&value) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        eprintln!("crbsh: {err}");
+                        shell.exit_code = 2;
+                        continue;
+                    }
+                };
+
+                match shell.assign_variable(name, value) {
+                    Ok(()) => shell.exit_code = 0,
+                    Err(err) => {
+                        eprintln!("crbsh: {err}");
+                        shell.exit_code = 2;
+                    }
+                }
+
                 continue;
             }
 
             ParsedInput::EnvironmentAssignment { name, value } => {
-                let value = shell.resolve_word(&value);
-                shell.set_environment(name, value);
-                shell.exit_code = 0;
+                match shell.evaluate(&value) {
+                    Ok(value) => {
+                        shell.set_environment(name, value.to_string());
+                        shell.exit_code = 0;
+                    }
+                    Err(err) => {
+                        eprintln!("crbsh: {err}");
+                        shell.exit_code = 2;
+                    }
+                }
+
                 continue;
             }
 
@@ -74,8 +123,17 @@ fn main() {
         {
             let resolved_args = args
                 .iter()
-                .map(|arg| shell.resolve_word(arg))
-                .collect::<Vec<_>>();
+                .map(|arg| shell.resolve_argument(arg))
+                .collect::<Result<Vec<_>, _>>();
+
+            let resolved_args = match resolved_args {
+                Ok(args) => args,
+                Err(err) => {
+                    eprintln!("crbsh: {err}");
+                    shell.exit_code = 1;
+                    continue;
+                }
+            };
 
             match builtin(&mut shell, &resolved_args) {
                 Ok(BuiltinOutcome::Continue) => {
@@ -101,7 +159,7 @@ fn main() {
             }
 
             Err(err) => {
-                eprintln!("crbsh: {}: {}", err.command, err.source);
+                eprintln!("crbsh: {}: {}", err.command, err.message);
                 shell.exit_code = 127;
             }
         }

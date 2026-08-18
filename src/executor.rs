@@ -1,15 +1,15 @@
 use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io::Write;
 use std::process::{Command, Stdio};
 
 use crate::builtins;
 use crate::parser::{ParsedCommand, Pipeline};
-use crate::shell::Shell;
+use crate::shell::{Shell, ShellError};
 
 #[derive(Debug)]
 pub struct ExecutionError {
     pub command: String,
-    pub source: io::Error,
+    pub message: String,
 }
 
 pub fn execute_pipeline(shell: &Shell, pipeline: &Pipeline) -> Result<i32, ExecutionError> {
@@ -28,7 +28,7 @@ pub fn execute_pipeline(shell: &Shell, pipeline: &Pipeline) -> Result<i32, Execu
     let mut previous_stdout = None;
     let start_index = match pipeline.commands.first() {
         Some(command) if command.name == "print" => {
-            initial_input = Some(print_output(shell, command).into_bytes());
+            initial_input = Some(print_output(shell, command)?.into_bytes());
             1
         }
         _ => 0,
@@ -38,13 +38,13 @@ pub fn execute_pipeline(shell: &Shell, pipeline: &Pipeline) -> Result<i32, Execu
     for (index, command) in pipeline.commands.iter().enumerate().skip(start_index) {
         let mut process = Command::new(&command.name);
         process
-            .args(resolved_args(shell, command))
+            .args(resolved_args(shell, command)?)
             .envs(shell.environment_overrides());
 
         if let Some(path) = &command.redirections.stdin {
             let input = File::open(path).map_err(|source| ExecutionError {
                 command: command.name.clone(),
-                source,
+                message: source.to_string(),
             })?;
             process.stdin(Stdio::from(input));
         } else if initial_input.is_some() {
@@ -65,7 +65,7 @@ pub fn execute_pipeline(shell: &Shell, pipeline: &Pipeline) -> Result<i32, Execu
 
         let mut child = process.spawn().map_err(|source| ExecutionError {
             command: command.name.clone(),
-            source,
+            message: source.to_string(),
         })?;
 
         if let Some(input) = initial_input.take()
@@ -73,7 +73,7 @@ pub fn execute_pipeline(shell: &Shell, pipeline: &Pipeline) -> Result<i32, Execu
         {
             stdin.write_all(&input).map_err(|source| ExecutionError {
                 command: command.name.clone(),
-                source,
+                message: source.to_string(),
             })?;
         }
 
@@ -89,7 +89,7 @@ pub fn execute_pipeline(shell: &Shell, pipeline: &Pipeline) -> Result<i32, Execu
     for mut child in children {
         let status = child.wait().map_err(|source| ExecutionError {
             command: "<pipeline>".into(),
-            source,
+            message: source.to_string(),
         })?;
         exit_code = status.code().unwrap_or(1);
     }
@@ -100,13 +100,13 @@ pub fn execute_pipeline(shell: &Shell, pipeline: &Pipeline) -> Result<i32, Execu
 fn execute_single_external(shell: &Shell, command: &ParsedCommand) -> Result<i32, ExecutionError> {
     let mut process = Command::new(&command.name);
     process
-        .args(resolved_args(shell, command))
+        .args(resolved_args(shell, command)?)
         .envs(shell.environment_overrides());
 
     if let Some(path) = &command.redirections.stdin {
         let input = File::open(path).map_err(|source| ExecutionError {
             command: command.name.clone(),
-            source,
+            message: source.to_string(),
         })?;
         process.stdin(Stdio::from(input));
     }
@@ -121,14 +121,14 @@ fn execute_single_external(shell: &Shell, command: &ParsedCommand) -> Result<i32
 
     let status = process.status().map_err(|source| ExecutionError {
         command: command.name.clone(),
-        source,
+        message: source.to_string(),
     })?;
 
     Ok(status.code().unwrap_or(1))
 }
 
 fn execute_print(shell: &Shell, command: &ParsedCommand) -> Result<i32, ExecutionError> {
-    let output = print_output(shell, command);
+    let output = print_output(shell, command)?;
 
     if let Some(redirection) = command.redirections.stdout.as_ref() {
         let mut file = output_file(command, &redirection.target, redirection.append)?;
@@ -136,7 +136,7 @@ fn execute_print(shell: &Shell, command: &ParsedCommand) -> Result<i32, Executio
         file.write_all(output.as_bytes())
             .map_err(|source| ExecutionError {
                 command: command.name.clone(),
-                source,
+                message: source.to_string(),
             })?;
     } else {
         print!("{output}");
@@ -145,17 +145,17 @@ fn execute_print(shell: &Shell, command: &ParsedCommand) -> Result<i32, Executio
     Ok(0)
 }
 
-fn print_output(shell: &Shell, command: &ParsedCommand) -> String {
-    let args = resolved_args(shell, command);
+fn print_output(shell: &Shell, command: &ParsedCommand) -> Result<String, ExecutionError> {
+    let args = resolved_args(shell, command)?;
 
-    builtins::print::output(&args)
+    Ok(builtins::print::output(&args))
 }
 
-fn resolved_args(shell: &Shell, command: &ParsedCommand) -> Vec<String> {
+fn resolved_args(shell: &Shell, command: &ParsedCommand) -> Result<Vec<String>, ExecutionError> {
     command
         .args
         .iter()
-        .map(|arg| shell.resolve_word(arg))
+        .map(|arg| shell.resolve_argument(arg).map_err(ExecutionError::from))
         .collect()
 }
 
@@ -168,8 +168,17 @@ fn output_file(command: &ParsedCommand, path: &str, append: bool) -> Result<File
         .open(path)
         .map_err(|source| ExecutionError {
             command: command.name.clone(),
-            source,
+            message: source.to_string(),
         })
+}
+
+impl From<ShellError> for ExecutionError {
+    fn from(error: ShellError) -> Self {
+        Self {
+            command: "evaluation".into(),
+            message: error.to_string(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -179,7 +188,8 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::parser::{OutputRedirection, ParsedCommand, Pipeline, Redirections};
-    use crate::shell::{NativeValue, Shell};
+    use crate::shell::Shell;
+    use crate::value::Value;
 
     use super::execute_pipeline;
 
@@ -317,8 +327,8 @@ mod tests {
         let output = dir.join("out.txt");
         let mut shell = Shell::new();
 
-        shell.set_variable("project", NativeValue::String("crbsh".into()));
-        shell.set_variable("retries", NativeValue::Int(3));
+        shell.set_variable("project", Value::String("crbsh".into()));
+        shell.set_variable("retries", Value::Int(3));
         shell.set_environment("CRBSH_TEST_ENV", "debug");
         shell.exit_code = 42;
 
@@ -351,6 +361,146 @@ mod tests {
             fs::read_to_string(output).unwrap(),
             "crbsh 3 debug debug 42\n"
         );
+    }
+
+    #[test]
+    fn keeps_quoted_identifier_literal() {
+        let dir = temp_dir("keeps_quoted_identifier_literal");
+        let output = dir.join("out.txt");
+        let mut shell = Shell::new();
+
+        shell.set_variable("project", Value::String("crbsh".into()));
+
+        let code = execute_pipeline(
+            &shell,
+            &Pipeline {
+                commands: vec![ParsedCommand {
+                    name: "print".into(),
+                    args: vec![Value::String("project".into()).into()],
+                    redirections: Redirections {
+                        stdin: None,
+                        stdout: Some(OutputRedirection {
+                            target: output.to_string_lossy().into_owned(),
+                            append: false,
+                        }),
+                    },
+                }],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(code, 0);
+        assert_eq!(fs::read_to_string(output).unwrap(), "project\n");
+    }
+
+    #[test]
+    fn reports_undefined_environment_variable_in_arguments() {
+        let shell = Shell::new();
+        let error = execute_pipeline(
+            &shell,
+            &Pipeline {
+                commands: vec![ParsedCommand {
+                    name: "print".into(),
+                    args: vec![crate::parser::Expression::EnvironmentVariable(
+                        "CRBSH_DEFINITELY_MISSING".into(),
+                    )],
+                    redirections: Redirections::default(),
+                }],
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.command, "evaluation");
+        assert_eq!(
+            error.message,
+            "undefined environment variable 'CRBSH_DEFINITELY_MISSING'"
+        );
+    }
+
+    #[test]
+    fn exports_environment_overrides_to_external_pipeline_processes() {
+        let dir = temp_dir("exports_environment_overrides_to_external_pipeline_processes");
+        let output = dir.join("out.txt");
+        let mut shell = Shell::new();
+
+        shell.set_environment("CRBSH_PIPE_ENV", "debug");
+
+        let code = execute_pipeline(
+            &shell,
+            &Pipeline {
+                commands: vec![
+                    ParsedCommand {
+                        name: "/usr/bin/env".into(),
+                        args: Vec::new(),
+                        redirections: Redirections::default(),
+                    },
+                    ParsedCommand {
+                        name: "grep".into(),
+                        args: vec![Value::String("CRBSH_PIPE_ENV=debug".into()).into()],
+                        redirections: Redirections {
+                            stdin: None,
+                            stdout: Some(OutputRedirection {
+                                target: output.to_string_lossy().into_owned(),
+                                append: false,
+                            }),
+                        },
+                    },
+                ],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(code, 0);
+        assert_eq!(
+            fs::read_to_string(output).unwrap(),
+            "CRBSH_PIPE_ENV=debug\n"
+        );
+    }
+
+    #[test]
+    fn pipeline_exit_code_comes_from_last_stage() {
+        let shell = Shell::new();
+
+        let earlier_failure_code = execute_pipeline(
+            &shell,
+            &Pipeline {
+                commands: vec![
+                    ParsedCommand {
+                        name: "false".into(),
+                        args: Vec::new(),
+                        redirections: Redirections::default(),
+                    },
+                    ParsedCommand {
+                        name: "true".into(),
+                        args: Vec::new(),
+                        redirections: Redirections::default(),
+                    },
+                ],
+            },
+        )
+        .unwrap();
+
+        let last_failure_code = execute_pipeline(
+            &shell,
+            &Pipeline {
+                commands: vec![
+                    ParsedCommand {
+                        name: "true".into(),
+                        args: Vec::new(),
+                        redirections: Redirections::default(),
+                    },
+                    ParsedCommand {
+                        name: "false".into(),
+                        args: Vec::new(),
+                        redirections: Redirections::default(),
+                    },
+                ],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(earlier_failure_code, 0);
+        assert_eq!(last_failure_code, 1);
     }
 
     fn temp_dir(test_name: &str) -> PathBuf {

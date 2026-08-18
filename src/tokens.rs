@@ -1,6 +1,11 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Token {
     Word(String),
+    StringLiteral(String),
+    IntLiteral(i64),
+    BoolLiteral(bool),
+    Assign,
+    Colon,
     Pipe,
     RedirectOut,
     RedirectAppend,
@@ -23,6 +28,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, TokenizeError> {
 
     let mut in_single_quotes = false;
     let mut in_double_quotes = false;
+    let mut quoted = false;
     let mut escaped = false;
 
     while let Some(ch) = chars.next() {
@@ -38,20 +44,22 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, TokenizeError> {
             }
 
             '\'' if !in_double_quotes => {
+                quoted = true;
                 in_single_quotes = !in_single_quotes;
             }
 
             '"' if !in_single_quotes => {
+                quoted = true;
                 in_double_quotes = !in_double_quotes;
             }
 
             '|' if !in_single_quotes && !in_double_quotes => {
-                push_word(&mut tokens, &mut current);
+                push_word(&mut tokens, &mut current, &mut quoted);
                 tokens.push(Token::Pipe);
             }
 
             '>' if !in_single_quotes && !in_double_quotes => {
-                push_word(&mut tokens, &mut current);
+                push_word(&mut tokens, &mut current, &mut quoted);
 
                 if matches!(chars.peek(), Some('>')) {
                     chars.next();
@@ -62,17 +70,27 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, TokenizeError> {
             }
 
             '<' if !in_single_quotes && !in_double_quotes => {
-                push_word(&mut tokens, &mut current);
+                push_word(&mut tokens, &mut current, &mut quoted);
                 tokens.push(Token::RedirectIn);
             }
 
             '&' if !in_single_quotes && !in_double_quotes => {
-                push_word(&mut tokens, &mut current);
+                push_word(&mut tokens, &mut current, &mut quoted);
                 tokens.push(Token::Background);
             }
 
+            '=' if !in_single_quotes && !in_double_quotes => {
+                push_word(&mut tokens, &mut current, &mut quoted);
+                tokens.push(Token::Assign);
+            }
+
+            ':' if !in_single_quotes && !in_double_quotes => {
+                push_word(&mut tokens, &mut current, &mut quoted);
+                tokens.push(Token::Colon);
+            }
+
             ch if ch.is_whitespace() && !in_single_quotes && !in_double_quotes => {
-                push_word(&mut tokens, &mut current);
+                push_word(&mut tokens, &mut current, &mut quoted);
             }
 
             _ => {
@@ -93,14 +111,33 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, TokenizeError> {
         return Err(TokenizeError::UnterminatedDoubleQuote);
     }
 
-    push_word(&mut tokens, &mut current);
+    push_word(&mut tokens, &mut current, &mut quoted);
 
     Ok(tokens)
 }
 
-fn push_word(tokens: &mut Vec<Token>, current: &mut String) {
+fn push_word(tokens: &mut Vec<Token>, current: &mut String, quoted: &mut bool) {
     if !current.is_empty() {
-        tokens.push(Token::Word(std::mem::take(current)));
+        let value = std::mem::take(current);
+
+        if *quoted {
+            tokens.push(Token::StringLiteral(value));
+        } else {
+            tokens.push(classify_word(value));
+        }
+
+        *quoted = false;
+    }
+}
+
+fn classify_word(value: String) -> Token {
+    match value.as_str() {
+        "true" => Token::BoolLiteral(true),
+        "false" => Token::BoolLiteral(false),
+        _ => value
+            .parse::<i64>()
+            .map(Token::IntLiteral)
+            .unwrap_or(Token::Word(value)),
     }
 }
 
@@ -114,7 +151,7 @@ mod tests {
 
         assert_eq!(
             tokens,
-            vec![Token::Word("print".into()), Token::Word("hello".into()),]
+            vec![Token::Word("print".into()), Token::Word("hello".into())]
         );
     }
 
@@ -185,7 +222,7 @@ mod tests {
             tokens,
             vec![
                 Token::Word("sleep".into()),
-                Token::Word("10".into()),
+                Token::IntLiteral(10),
                 Token::Background,
             ]
         );
@@ -199,7 +236,7 @@ mod tests {
             tokens,
             vec![
                 Token::Word("print".into()),
-                Token::Word("hello | crab > file".into()),
+                Token::StringLiteral("hello | crab > file".into()),
             ]
         );
     }
@@ -210,7 +247,38 @@ mod tests {
 
         assert_eq!(
             tokens,
-            vec![Token::Word("print".into()), Token::Word("|".into()),]
+            vec![Token::Word("print".into()), Token::Word("|".into())]
+        );
+    }
+
+    #[test]
+    fn tokenizes_assignment_and_type_annotation() {
+        let tokens = tokenize(r#"let retries: int = 3"#).unwrap();
+
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Word("let".into()),
+                Token::Word("retries".into()),
+                Token::Colon,
+                Token::Word("int".into()),
+                Token::Assign,
+                Token::IntLiteral(3),
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenizes_bool_and_quoted_bool_differently() {
+        let tokens = tokenize(r#"print true "true""#).unwrap();
+
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Word("print".into()),
+                Token::BoolLiteral(true),
+                Token::StringLiteral("true".into()),
+            ]
         );
     }
 
