@@ -8,7 +8,7 @@ mod value;
 
 use std::fs;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use builtins::BuiltinOutcome;
 use parser::{Iterable, ParsedInput};
@@ -59,6 +59,8 @@ fn main() {
 }
 
 fn run_repl(shell: &mut Shell) {
+    run_interactive_config(shell);
+
     loop {
         print!("{}", prompt::render());
         io::stdout().flush().unwrap();
@@ -105,7 +107,42 @@ fn run_script(shell: &mut Shell, path: &str) -> i32 {
         }
     };
 
-    let statements = collect_source_statements(&source);
+    execute_source(shell, &source)
+}
+
+fn run_interactive_config(shell: &mut Shell) {
+    let Some(path) = interactive_config_path() else {
+        return;
+    };
+
+    if let Some(code) = run_config_file(shell, &path)
+        && code != 0
+    {
+        shell.exit_code = code;
+    }
+}
+
+fn interactive_config_path() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".crbshrc"))
+}
+
+fn run_config_file(shell: &mut Shell, path: &Path) -> Option<i32> {
+    let source = match fs::read_to_string(path) {
+        Ok(source) => source,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return None,
+        Err(err) => {
+            eprintln!("crbsh: {}: {err}", path.display());
+            return Some(1);
+        }
+    };
+
+    Some(execute_source(shell, &source))
+}
+
+fn execute_source(shell: &mut Shell, source: &str) -> i32 {
+    let statements = collect_source_statements(source);
 
     for statement in statements {
         let parsed_input = match parser::parse(&statement) {
@@ -913,6 +950,48 @@ let total = add(2, 3)
     }
 
     #[test]
+    fn missing_config_file_is_ignored() {
+        let mut shell = Shell::new();
+        let path = temp_script_path("missing_config_file_is_ignored");
+
+        assert_eq!(run_config_file(&mut shell, &path), None);
+        assert_eq!(shell.exit_code, 0);
+    }
+
+    #[test]
+    fn config_file_runs_in_interactive_shell_state() {
+        let path = temp_config_path("config_file_runs_in_interactive_shell_state");
+        fs::write(
+            &path,
+            r#"
+let project = "crbsh"
+
+fn add(a: int, b: int) -> int {
+    return a + b
+}
+
+let total = add(2, 3)
+"#,
+        )
+        .unwrap();
+
+        let mut shell = Shell::new();
+        let code = run_config_file(&mut shell, &path);
+
+        fs::remove_file(path).unwrap();
+
+        assert_eq!(code, Some(0));
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("project".into())),
+            Ok(Value::String("crbsh".into()))
+        );
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("total".into())),
+            Ok(Value::Int(5))
+        );
+    }
+
+    #[test]
     fn rejects_non_crb_script_extension() {
         let mut shell = Shell::new();
 
@@ -936,6 +1015,17 @@ let total = add(2, 3)
             .as_nanos();
 
         path.push(format!("crbsh-{name}-{unique}.crb"));
+        path
+    }
+
+    fn temp_config_path(name: &str) -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+
+        path.push(format!("crbsh-{name}-{unique}.crbshrc"));
         path
     }
 }
