@@ -34,7 +34,7 @@ fn main() {
             Ok(parsed_input) => parsed_input,
 
             Err(err) => {
-                eprintln!("crbsh: parse error: {err:?}");
+                eprintln!("crbsh: {}", parser::format_error(&err));
                 shell.exit_code = 2;
                 continue;
             }

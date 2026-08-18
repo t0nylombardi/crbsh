@@ -46,6 +46,7 @@ pub enum ParseError {
     InvalidVariableName(String),
     MissingAssignmentValue,
     MissingRedirectionTarget,
+    ReservedName(String),
     UnsupportedRedirection(Token),
     UnexpectedToken(Token),
 }
@@ -87,6 +88,10 @@ pub fn parse(input: &str) -> Result<ParsedInput, ParseError> {
 fn parse_let(name: &str, operator: &str, rest: &[Token]) -> Result<ParsedInput, ParseError> {
     if !is_valid_identifier(name) {
         return Err(ParseError::InvalidVariableName(name.into()));
+    }
+
+    if is_reserved_name(name) {
+        return Err(ParseError::ReservedName(name.into()));
     }
 
     let value = parse_assignment_value(operator, rest)?;
@@ -248,6 +253,19 @@ fn is_valid_environment_name(value: &str) -> bool {
         && value
             .chars()
             .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn is_reserved_name(value: &str) -> bool {
+    matches!(value, "status")
+}
+
+pub fn format_error(error: &ParseError) -> String {
+    match error {
+        ParseError::ReservedName(name) => {
+            format!("cannot assign to reserved name '{name}'")
+        }
+        _ => format!("parse error: {error:?}"),
+    }
 }
 
 #[test]
@@ -424,6 +442,13 @@ fn rejects_missing_assignment_value() {
     let result = parse("let project =");
 
     assert_eq!(result, Err(ParseError::MissingAssignmentValue));
+}
+
+#[test]
+fn rejects_assignment_to_status() {
+    let result = parse("let status = 5");
+
+    assert_eq!(result, Err(ParseError::ReservedName("status".into())));
 }
 
 #[test]
