@@ -2,7 +2,10 @@ pub mod registry;
 
 pub mod cd;
 pub mod exit;
+pub mod export;
 pub mod print;
+pub mod set;
+pub mod unset;
 
 #[derive(Debug)]
 pub enum BuiltinOutcome {

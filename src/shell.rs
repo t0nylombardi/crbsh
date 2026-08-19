@@ -124,10 +124,50 @@ impl Shell {
         self.environment.insert(name.into(), value.into());
     }
 
+    pub fn unset_environment(&mut self, name: &str) -> bool {
+        self.environment.remove(name).is_some()
+    }
+
     pub fn environment_overrides(&self) -> impl Iterator<Item = (&str, &str)> {
         self.environment
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str()))
+    }
+
+    pub fn variables(&self) -> Vec<(String, Value)> {
+        let mut variables = HashMap::new();
+
+        for scope in &self.scopes {
+            for (name, value) in scope {
+                variables.insert(name.clone(), value.clone());
+            }
+        }
+
+        let mut variables = variables.into_iter().collect::<Vec<_>>();
+        variables.sort_by(|(left, _), (right, _)| left.cmp(right));
+        variables
+    }
+
+    pub fn variable_value(&self, name: &str) -> Option<Value> {
+        self.find_variable(name)
+    }
+
+    pub fn export_variable(&mut self, name: &str) -> Result<(), ShellError> {
+        let Some(value) = self.find_variable(name) else {
+            return Err(ShellError::VariableNotDefined(name.into()));
+        };
+
+        self.set_environment(name, value.to_string());
+
+        Ok(())
+    }
+
+    pub fn unset_variable(&mut self, name: &str) -> bool {
+        self.scopes
+            .iter_mut()
+            .rev()
+            .find_map(|scope| scope.remove(name))
+            .is_some()
     }
 
     pub fn evaluate(&self, expression: &Expression) -> Result<Value, ShellError> {

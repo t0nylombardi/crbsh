@@ -11,7 +11,7 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use builtins::BuiltinOutcome;
-use parser::{Iterable, ParsedInput};
+use parser::{Expression, Iterable, ParsedInput};
 use shell::{Shell, ShellError};
 use value::TypeName;
 use value::Value;
@@ -439,10 +439,13 @@ fn execute_input(shell: &mut Shell, parsed_input: ParsedInput) -> ControlFlow {
                 && parsed.redirections.is_empty()
                 && let Some(builtin) = shell.builtins.get(command)
             {
-                let resolved_args = args
-                    .iter()
-                    .map(|arg| shell.resolve_argument(arg))
-                    .collect::<Result<Vec<_>, _>>();
+                let resolved_args = if uses_raw_builtin_args(command) {
+                    args.iter().map(raw_builtin_arg).collect()
+                } else {
+                    args.iter()
+                        .map(|arg| shell.resolve_argument(arg))
+                        .collect::<Result<Vec<_>, _>>()
+                };
 
                 let resolved_args = match resolved_args {
                     Ok(args) => args,
@@ -485,6 +488,30 @@ fn execute_input(shell: &mut Shell, parsed_input: ParsedInput) -> ControlFlow {
     }
 
     ControlFlow::Continue
+}
+
+fn uses_raw_builtin_args(command: &str) -> bool {
+    matches!(command, "export" | "set" | "unset")
+}
+
+fn raw_builtin_arg(argument: &Expression) -> Result<String, ShellError> {
+    Ok(match argument {
+        Expression::Identifier(name) => name.clone(),
+        Expression::EnvironmentVariable(name) => format!("env.{name}"),
+        Expression::Status => "status".into(),
+        Expression::Literal(value) => value.to_string(),
+        Expression::Binary {
+            left,
+            operator,
+            right,
+        } => format!(
+            "{} {} {}",
+            raw_builtin_arg(left)?,
+            operator.symbol(),
+            raw_builtin_arg(right)?
+        ),
+        Expression::Call { name, .. } => name.clone(),
+    })
 }
 
 fn execute_if(
@@ -1081,6 +1108,41 @@ let total = add(2, 3)
     #[test]
     fn glob_values_reject_multiple_wildcards() {
         assert!(glob_values("src/*/*.rs").is_empty());
+    }
+
+    #[test]
+    fn export_uses_native_variable_name() {
+        let mut shell = Shell::new();
+
+        run(&mut shell, r#"let project = "crbsh""#);
+        run(&mut shell, "export project");
+
+        assert_eq!(shell.environment_value("project").as_deref(), Some("crbsh"));
+    }
+
+    #[test]
+    fn export_sets_environment_override() {
+        let mut shell = Shell::new();
+
+        run(&mut shell, r#"export CRBSH_TEST_EXPORT = "debug""#);
+
+        assert_eq!(
+            shell.environment_value("CRBSH_TEST_EXPORT").as_deref(),
+            Some("debug")
+        );
+    }
+
+    #[test]
+    fn unset_removes_native_variable_and_environment_override() {
+        let mut shell = Shell::new();
+
+        run(&mut shell, "let retries = 3");
+        run(&mut shell, r#"env.CRBSH_TEST_UNSET = "debug""#);
+        run(&mut shell, "unset retries");
+        run(&mut shell, "unset env.CRBSH_TEST_UNSET");
+
+        assert_eq!(shell.variable_value("retries"), None);
+        assert!(shell.environment_overrides().next().is_none());
     }
 
     fn run(shell: &mut Shell, input: &str) {
