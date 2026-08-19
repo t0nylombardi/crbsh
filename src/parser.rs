@@ -99,6 +99,10 @@ pub enum PipelineConnector {
     Or,
 }
 
+/// AST layering for executable input:
+/// `ParsedInput::PipelineChain` connects full `Pipeline` nodes, each pipeline
+/// contains `ParsedCommand` nodes, and command arguments are `Expression`
+/// trees that evaluate to `Value`s.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParsedInput {
     Pipeline(Pipeline),
@@ -292,6 +296,13 @@ pub fn parse(input: &str) -> Result<ParsedInput, ParseError> {
 
     if tokens
         .iter()
+        .any(|token| matches!(token, Token::AndIf | Token::OrIf))
+    {
+        return parse_pipeline_chain(tokens);
+    }
+
+    if tokens
+        .iter()
         .any(|token| matches!(token, Token::Background))
     {
         if !matches!(tokens.last(), Some(Token::Background)) {
@@ -314,13 +325,6 @@ pub fn parse(input: &str) -> Result<ParsedInput, ParseError> {
             pipeline: parse_pipeline(tokens)?,
             command,
         });
-    }
-
-    if tokens
-        .iter()
-        .any(|token| matches!(token, Token::AndIf | Token::OrIf))
-    {
-        return parse_pipeline_chain(tokens);
     }
 
     match tokens.as_slice() {
@@ -371,6 +375,7 @@ fn parse_pipeline_chain(tokens: Vec<Token>) -> Result<ParsedInput, ParseError> {
                 connectors.push(pipeline_connector(&token));
                 segments.push(std::mem::take(&mut current));
             }
+            Token::Background => return Err(ParseError::UnexpectedToken(Token::Background)),
             token => current.push(token),
         }
     }
@@ -1486,6 +1491,22 @@ fn rejects_missing_pipeline_before_conditional_connector() {
     let result = parse("&& print ok");
 
     assert_eq!(result, Err(ParseError::UnexpectedToken(Token::AndIf)));
+}
+
+#[test]
+fn rejects_background_pipeline_inside_logical_chain() {
+    assert_eq!(
+        parse("foo & && bar"),
+        Err(ParseError::UnexpectedToken(Token::Background))
+    );
+    assert_eq!(
+        parse("foo && & bar"),
+        Err(ParseError::UnexpectedToken(Token::Background))
+    );
+    assert_eq!(
+        parse("foo && bar &"),
+        Err(ParseError::UnexpectedToken(Token::Background))
+    );
 }
 
 #[test]

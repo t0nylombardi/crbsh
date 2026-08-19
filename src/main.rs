@@ -1200,7 +1200,7 @@ let total = add(2, 3)
 
     #[test]
     fn and_connector_runs_next_pipeline_after_success() {
-        let output = temp_output_path("and_connector_runs_next_pipeline_after_success");
+        let output = temp_output_path("and_connector_runs_next_pipeline_after_success", "out");
         let mut shell = Shell::new();
 
         run(
@@ -1214,7 +1214,7 @@ let total = add(2, 3)
 
     #[test]
     fn and_connector_skips_next_pipeline_after_failure() {
-        let output = temp_output_path("and_connector_skips_next_pipeline_after_failure");
+        let output = temp_output_path("and_connector_skips_next_pipeline_after_failure", "out");
         let mut shell = Shell::new();
         let parsed = parser::parse(&format!(
             r#"false && print "skipped" > {}"#,
@@ -1233,7 +1233,7 @@ let total = add(2, 3)
 
     #[test]
     fn or_connector_runs_next_pipeline_after_failure() {
-        let output = temp_output_path("or_connector_runs_next_pipeline_after_failure");
+        let output = temp_output_path("or_connector_runs_next_pipeline_after_failure", "out");
         let mut shell = Shell::new();
 
         run(
@@ -1247,9 +1247,14 @@ let total = add(2, 3)
 
     #[test]
     fn conditional_connector_uses_previous_pipeline_exit_status() {
-        let dir = temp_output_path("conditional_connector_uses_previous_pipeline_exit_status");
-        let input = dir.with_extension("txt");
-        let output = dir.with_extension("out");
+        let input = temp_output_path(
+            "conditional_connector_uses_previous_pipeline_exit_status",
+            "txt",
+        );
+        let output = temp_output_path(
+            "conditional_connector_uses_previous_pipeline_exit_status",
+            "out",
+        );
         fs::write(&input, "blue\ncrab\n").unwrap();
 
         let mut shell = Shell::new();
@@ -1264,6 +1269,114 @@ let total = add(2, 3)
 
         assert_eq!(fs::read_to_string(&output).unwrap(), "found it\n");
         fs::remove_file(input).unwrap();
+        fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn or_connector_skips_next_pipeline_after_success() {
+        let output = temp_output_path("or_connector_skips_next_pipeline_after_success", "out");
+        let mut shell = Shell::new();
+        let parsed =
+            parser::parse(&format!(r#"true || print "nope" > {}"#, output.display())).unwrap();
+
+        assert!(matches!(
+            execute_input(&mut shell, parsed),
+            ControlFlow::Continue
+        ));
+
+        assert_eq!(shell.exit_code, 0);
+        assert!(!output.exists());
+    }
+
+    #[test]
+    fn and_chain_runs_left_to_right_after_successes() {
+        let output = temp_output_path("and_chain_runs_left_to_right_after_successes", "out");
+        let mut shell = Shell::new();
+
+        run(
+            &mut shell,
+            &format!(
+                r#"true && print A > {} && print B >> {}"#,
+                output.display(),
+                output.display()
+            ),
+        );
+
+        assert_eq!(fs::read_to_string(&output).unwrap(), "A\nB\n");
+        fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn or_chain_stops_after_first_successful_fallback() {
+        let output = temp_output_path("or_chain_stops_after_first_successful_fallback", "out");
+        let mut shell = Shell::new();
+
+        run(
+            &mut shell,
+            &format!(
+                r#"false || print A > {} || print B >> {}"#,
+                output.display(),
+                output.display()
+            ),
+        );
+
+        assert_eq!(fs::read_to_string(&output).unwrap(), "A\n");
+        fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn mixed_chain_false_and_then_or_runs_fallback() {
+        let output = temp_output_path("mixed_chain_false_and_then_or_runs_fallback", "out");
+        let mut shell = Shell::new();
+
+        run(
+            &mut shell,
+            &format!(
+                r#"false && print A > {} || print B > {}"#,
+                output.display(),
+                output.display()
+            ),
+        );
+
+        assert_eq!(fs::read_to_string(&output).unwrap(), "B\n");
+        fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn mixed_chain_true_or_then_and_runs_final_pipeline() {
+        let output = temp_output_path("mixed_chain_true_or_then_and_runs_final_pipeline", "out");
+        let mut shell = Shell::new();
+
+        run(
+            &mut shell,
+            &format!(
+                r#"true || print A > {} && print B > {}"#,
+                output.display(),
+                output.display()
+            ),
+        );
+
+        assert_eq!(fs::read_to_string(&output).unwrap(), "B\n");
+        fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn multiline_pipeline_conditional_uses_previous_pipeline_status() {
+        let output = temp_output_path(
+            "multiline_pipeline_conditional_uses_previous_pipeline_status",
+            "out",
+        );
+
+        let mut shell = Shell::new();
+        run(
+            &mut shell,
+            &format!(
+                "printf crab | grep -q crab &&\n    print found > {}",
+                output.display()
+            ),
+        );
+
+        assert_eq!(fs::read_to_string(&output).unwrap(), "found\n");
         fs::remove_file(output).unwrap();
     }
 
@@ -1298,14 +1411,14 @@ let total = add(2, 3)
         path
     }
 
-    fn temp_output_path(name: &str) -> std::path::PathBuf {
+    fn temp_output_path(name: &str, extension: &str) -> std::path::PathBuf {
         let mut path = std::env::temp_dir();
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
 
-        path.push(format!("crbsh-{name}-{unique}"));
+        path.push(format!("crbsh-{name}-{unique}.{extension}"));
         path
     }
 }
