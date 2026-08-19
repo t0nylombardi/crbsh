@@ -2,9 +2,16 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::builtins::registry::BuiltinRegistry;
+use crate::history::History;
 use crate::jobs::JobManager;
-use crate::parser::{BinaryOperator, Expression, FunctionDefinition};
+use crate::parser::{BinaryOperator, Expression, FunctionDefinition, ParsedCommand};
 use crate::value::{TypeName, Value};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AliasError {
+    InvalidReplacement(String),
+    Cycle(Vec<String>),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShellError {
@@ -28,6 +35,8 @@ pub enum ShellError {
 
 pub struct Shell {
     pub builtins: BuiltinRegistry,
+    pub aliases: HashMap<String, String>,
+    pub history: History,
     pub jobs: JobManager,
     pub exit_code: i32,
     scopes: Vec<HashMap<String, Value>>,
@@ -39,12 +48,56 @@ impl Shell {
     pub fn new() -> Self {
         Self {
             builtins: BuiltinRegistry::new(),
+            aliases: HashMap::new(),
+            history: History::default(),
             jobs: JobManager::new(),
             exit_code: 0,
             scopes: vec![HashMap::new()],
             functions: HashMap::new(),
             environment: HashMap::new(),
         }
+    }
+
+    pub fn set_alias(
+        &mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<(), AliasError> {
+        let name = name.into();
+        let value = value.into();
+
+        validate_alias_name(&name)?;
+        parse_alias_replacement(&value)?;
+
+        self.aliases.insert(name, value);
+
+        Ok(())
+    }
+
+    pub fn unset_alias(&mut self, name: &str) -> bool {
+        self.aliases.remove(name).is_some()
+    }
+
+    pub fn alias_value(&self, name: &str) -> Option<String> {
+        self.aliases.get(name).cloned()
+    }
+
+    pub fn aliases(&self) -> Vec<(String, String)> {
+        let mut aliases = self
+            .aliases
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect::<Vec<_>>();
+
+        aliases.sort_by(|(left, _), (right, _)| left.cmp(right));
+        aliases
+    }
+
+    pub fn alias_command(&self, name: &str) -> Result<Option<ParsedCommand>, AliasError> {
+        self.aliases
+            .get(name)
+            .map(|value| parse_alias_replacement(value))
+            .transpose()
     }
 
     pub fn push_scope(&mut self) {
@@ -251,6 +304,19 @@ impl Shell {
     }
 }
 
+impl fmt::Display for AliasError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidReplacement(message) => write!(formatter, "{message}"),
+            Self::Cycle(names) => write!(
+                formatter,
+                "alias expansion cycle detected: {}",
+                names.join(" -> ")
+            ),
+        }
+    }
+}
+
 impl fmt::Display for ShellError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -287,6 +353,51 @@ impl fmt::Display for ShellError {
             }
         }
     }
+}
+
+fn validate_alias_name(name: &str) -> Result<(), AliasError> {
+    if name.is_empty() {
+        return Err(AliasError::InvalidReplacement(
+            "alias name cannot be empty".into(),
+        ));
+    }
+
+    if name.contains(['=', '|', '&', '<', '>', ' ', '\t', '\n']) {
+        return Err(AliasError::InvalidReplacement(format!(
+            "invalid alias name '{name}'"
+        )));
+    }
+
+    Ok(())
+}
+
+fn parse_alias_replacement(value: &str) -> Result<ParsedCommand, AliasError> {
+    let parsed = crate::parser::parse(value).map_err(|err| {
+        AliasError::InvalidReplacement(format!(
+            "invalid alias replacement: {}",
+            crate::parser::format_error(&err)
+        ))
+    })?;
+
+    let crate::parser::ParsedInput::Pipeline(pipeline) = parsed else {
+        return Err(AliasError::InvalidReplacement(
+            "alias replacement must be a single command without redirection".into(),
+        ));
+    };
+
+    let [command] = pipeline.commands.as_slice() else {
+        return Err(AliasError::InvalidReplacement(
+            "alias replacement must be a single command without redirection".into(),
+        ));
+    };
+
+    if !command.redirections.is_empty() {
+        return Err(AliasError::InvalidReplacement(
+            "alias replacement must be a single command without redirection".into(),
+        ));
+    }
+
+    Ok(command.clone())
 }
 
 pub fn evaluate_binary(

@@ -1,5 +1,6 @@
 mod builtins;
 mod executor;
+mod history;
 mod jobs;
 mod parser;
 mod prompt;
@@ -12,7 +13,7 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use builtins::BuiltinOutcome;
-use parser::{Expression, Iterable, ParsedInput, Pipeline, PipelineConnector};
+use parser::{Expression, Iterable, ParsedCommand, ParsedInput, Pipeline, PipelineConnector};
 use shell::{Shell, ShellError};
 use value::TypeName;
 use value::Value;
@@ -60,6 +61,18 @@ fn main() {
 }
 
 fn run_repl(shell: &mut Shell) {
+    let history_path = history::default_history_path();
+
+    if let Some(path) = history_path.as_ref() {
+        match history::History::load(path, 1000) {
+            Ok(history) => shell.history = history,
+            Err(err) => {
+                eprintln!("crbsh: {}: {err}", path.display());
+                shell.exit_code = 1;
+            }
+        }
+    }
+
     run_interactive_config(shell);
 
     loop {
@@ -88,6 +101,14 @@ fn run_repl(shell: &mut Shell) {
                 continue;
             }
         };
+
+        shell.history.add(&input);
+        if let Some(path) = history_path.as_ref()
+            && let Err(err) = shell.history.save(path)
+        {
+            eprintln!("crbsh: {}: {err}", path.display());
+            shell.exit_code = 1;
+        }
 
         let flow = execute_input(shell, parsed_input);
         handle_control_flow(shell, flow, true);
@@ -435,6 +456,15 @@ fn execute_input(shell: &mut Shell, parsed_input: ParsedInput) -> ControlFlow {
         }
 
         ParsedInput::BackgroundPipeline { pipeline, command } => {
+            let pipeline = match expand_pipeline_aliases(shell, pipeline) {
+                Ok(pipeline) => pipeline,
+                Err(err) => {
+                    eprintln!("crbsh: {err}");
+                    shell.exit_code = 2;
+                    return ControlFlow::Continue;
+                }
+            };
+
             if pipeline.commands.is_empty() {
                 shell.exit_code = 0;
                 return ControlFlow::Continue;
@@ -458,6 +488,15 @@ fn execute_input(shell: &mut Shell, parsed_input: ParsedInput) -> ControlFlow {
 }
 
 fn execute_pipeline_input(shell: &mut Shell, pipeline: Pipeline) -> ControlFlow {
+    let pipeline = match expand_pipeline_aliases(shell, pipeline) {
+        Ok(pipeline) => pipeline,
+        Err(err) => {
+            eprintln!("crbsh: {err}");
+            shell.exit_code = 2;
+            return ControlFlow::Continue;
+        }
+    };
+
     let parsed = match pipeline.commands.first() {
         Some(command) => command,
         None => {
@@ -544,7 +583,45 @@ fn execute_pipeline_input(shell: &mut Shell, pipeline: Pipeline) -> ControlFlow 
 }
 
 fn uses_raw_builtin_args(command: &str) -> bool {
-    matches!(command, "export" | "set" | "unset")
+    matches!(command, "alias" | "export" | "set" | "unalias" | "unset")
+}
+
+fn expand_pipeline_aliases(
+    shell: &Shell,
+    pipeline: Pipeline,
+) -> Result<Pipeline, shell::AliasError> {
+    pipeline
+        .commands
+        .into_iter()
+        .map(|command| expand_command_aliases(shell, command))
+        .collect::<Result<Vec<_>, _>>()
+        .map(|commands| Pipeline { commands })
+}
+
+fn expand_command_aliases(
+    shell: &Shell,
+    mut command: ParsedCommand,
+) -> Result<ParsedCommand, shell::AliasError> {
+    let mut seen = Vec::new();
+
+    loop {
+        let Some(replacement) = shell.alias_command(&command.name)? else {
+            return Ok(command);
+        };
+
+        if let Some(index) = seen.iter().position(|name| name == &command.name) {
+            seen.push(command.name);
+            return Err(shell::AliasError::Cycle(seen[index..].to_vec()));
+        }
+
+        seen.push(command.name);
+
+        let mut args = replacement.args;
+        args.extend(command.args);
+
+        command.name = replacement.name;
+        command.args = args;
+    }
 }
 
 fn raw_builtin_arg(argument: &Expression) -> Result<String, ShellError> {
@@ -1378,6 +1455,62 @@ let total = add(2, 3)
 
         assert_eq!(fs::read_to_string(&output).unwrap(), "found\n");
         fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn alias_expands_command_position_and_preserves_arguments() {
+        let output = temp_output_path(
+            "alias_expands_command_position_and_preserves_arguments",
+            "out",
+        );
+        let mut shell = Shell::new();
+
+        run(&mut shell, r#"alias p = "print alias""#);
+        run(&mut shell, &format!("p tail > {}", output.display()));
+
+        assert_eq!(fs::read_to_string(&output).unwrap(), "alias tail\n");
+        fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn chained_aliases_expand_until_real_command() {
+        let output = temp_output_path("chained_aliases_expand_until_real_command", "out");
+        let mut shell = Shell::new();
+
+        run(&mut shell, r#"alias l = "ll""#);
+        run(&mut shell, r#"alias ll = "print long""#);
+        run(&mut shell, &format!("l form > {}", output.display()));
+
+        assert_eq!(fs::read_to_string(&output).unwrap(), "long form\n");
+        fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn alias_does_not_expand_non_command_arguments() {
+        let output = temp_output_path("alias_does_not_expand_non_command_arguments", "out");
+        let mut shell = Shell::new();
+
+        run(&mut shell, r#"alias ll = "print expanded""#);
+        run(&mut shell, &format!("print ll > {}", output.display()));
+
+        assert_eq!(fs::read_to_string(&output).unwrap(), "ll\n");
+        fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn alias_cycle_sets_parse_style_failure_status() {
+        let mut shell = Shell::new();
+
+        run(&mut shell, r#"alias a = "b""#);
+        run(&mut shell, r#"alias b = "a""#);
+
+        let parsed = parser::parse("a").unwrap();
+
+        assert!(matches!(
+            execute_input(&mut shell, parsed),
+            ControlFlow::Continue
+        ));
+        assert_eq!(shell.exit_code, 2);
     }
 
     fn run(shell: &mut Shell, input: &str) {

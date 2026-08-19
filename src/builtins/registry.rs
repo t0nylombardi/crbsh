@@ -16,13 +16,16 @@ impl BuiltinRegistry {
             commands: HashMap::new(),
         };
 
+        registry.register("alias", super::alias::run);
         registry.register("cd", super::cd::run);
         registry.register("exit", super::exit::run);
         registry.register("export", super::export::run);
         registry.register("fg", super::fg::run);
+        registry.register("history", super::history::run);
         registry.register("jobs", super::jobs::run);
         registry.register("print", super::print::run);
         registry.register("set", super::set::run);
+        registry.register("unalias", super::unalias::run);
         registry.register("unset", super::unset::run);
 
         registry

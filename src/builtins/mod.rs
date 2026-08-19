@@ -1,12 +1,15 @@
 pub mod registry;
 
+pub mod alias;
 pub mod cd;
 pub mod exit;
 pub mod export;
 pub mod fg;
+pub mod history;
 pub mod jobs;
 pub mod print;
 pub mod set;
+pub mod unalias;
 pub mod unset;
 
 #[derive(Debug)]
