@@ -1,5 +1,7 @@
 use std::process::Child;
 
+use std::os::unix::process::ExitStatusExt;
+
 pub type JobId = u32;
 
 pub struct Job {
@@ -24,6 +26,14 @@ pub struct JobStatus {
 pub struct JobManager {
     jobs: Vec<Job>,
     next_id: JobId,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum JobError {
+    NoActiveJob,
+    NoSuchJob(JobId),
+    JobNotRunning(JobId),
+    WaitFailed(String),
 }
 
 impl JobManager {
@@ -61,6 +71,43 @@ impl JobManager {
             .collect()
     }
 
+    pub fn foreground(&mut self, requested_id: Option<JobId>) -> Result<i32, JobError> {
+        self.refresh();
+
+        let Some(index) = self.foreground_job_index(requested_id) else {
+            return Err(match requested_id {
+                Some(id) => JobError::NoSuchJob(id),
+                None => JobError::NoActiveJob,
+            });
+        };
+
+        if self.jobs[index].state != JobState::Running {
+            return Err(JobError::JobNotRunning(self.jobs[index].id));
+        }
+
+        let mut job = self.jobs.remove(index);
+        let mut exit_code = 0;
+
+        for child in &mut job.children {
+            let status = child
+                .wait()
+                .map_err(|err| JobError::WaitFailed(err.to_string()))?;
+            exit_code = status_exit_code(status);
+        }
+
+        Ok(exit_code)
+    }
+
+    fn foreground_job_index(&self, requested_id: Option<JobId>) -> Option<usize> {
+        match requested_id {
+            Some(id) => self.jobs.iter().position(|job| job.id == id),
+            None => self
+                .jobs
+                .iter()
+                .rposition(|job| job.state == JobState::Running),
+        }
+    }
+
     fn refresh(&mut self) {
         for job in &mut self.jobs {
             if job.state == JobState::Done {
@@ -81,6 +128,13 @@ impl JobManager {
             }
         }
     }
+}
+
+fn status_exit_code(status: std::process::ExitStatus) -> i32 {
+    status
+        .code()
+        .or_else(|| status.signal().map(|signal| 128 + signal))
+        .unwrap_or(1)
 }
 
 impl Drop for JobManager {
@@ -121,5 +175,44 @@ mod tests {
         let statuses = manager.statuses();
         assert_eq!(statuses[0].state, JobState::Done);
         assert_eq!(statuses[0].command, "sleep 0.1");
+    }
+
+    #[test]
+    fn foreground_waits_for_requested_running_job_and_removes_it() {
+        let mut manager = JobManager::new();
+        let child = Command::new("sleep").arg("0.1").spawn().unwrap();
+
+        let id = manager.add("sleep 0.1", vec![child]);
+
+        assert_eq!(manager.foreground(Some(id)), Ok(0));
+        assert!(manager.statuses().is_empty());
+    }
+
+    #[test]
+    fn foreground_without_id_uses_most_recent_running_job() {
+        let mut manager = JobManager::new();
+        let first = Command::new("sleep").arg("0.1").spawn().unwrap();
+        let second = Command::new("sleep").arg("0.1").spawn().unwrap();
+
+        let first_id = manager.add("sleep 0.1", vec![first]);
+        let second_id = manager.add("sleep 0.1", vec![second]);
+
+        assert_eq!(manager.foreground(None), Ok(0));
+
+        let statuses = manager.statuses();
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].id, first_id);
+        assert_ne!(statuses[0].id, second_id);
+    }
+
+    #[test]
+    fn foreground_reports_missing_active_job() {
+        let mut manager = JobManager::new();
+
+        assert_eq!(manager.foreground(None), Err(super::JobError::NoActiveJob));
+        assert_eq!(
+            manager.foreground(Some(7)),
+            Err(super::JobError::NoSuchJob(7))
+        );
     }
 }

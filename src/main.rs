@@ -462,6 +462,10 @@ fn execute_input(shell: &mut Shell, parsed_input: ParsedInput) -> ControlFlow {
                         shell.exit_code = 0;
                     }
 
+                    Ok(BuiltinOutcome::ContinueWithStatus(code)) => {
+                        shell.exit_code = code;
+                    }
+
                     Ok(BuiltinOutcome::Exit(code)) => {
                         return ControlFlow::Exit(code);
                     }

@@ -3,6 +3,7 @@ pub mod registry;
 pub mod cd;
 pub mod exit;
 pub mod export;
+pub mod fg;
 pub mod jobs;
 pub mod print;
 pub mod set;
@@ -11,6 +12,7 @@ pub mod unset;
 #[derive(Debug)]
 pub enum BuiltinOutcome {
     Continue,
+    ContinueWithStatus(i32),
     Exit(i32),
 }
 
