@@ -1,5 +1,6 @@
 mod builtins;
 mod executor;
+mod jobs;
 mod parser;
 mod prompt;
 mod shell;
@@ -477,6 +478,25 @@ fn execute_input(shell: &mut Shell, parsed_input: ParsedInput) -> ControlFlow {
             match executor::execute_pipeline(shell, &pipeline) {
                 Ok(code) => {
                     shell.exit_code = code;
+                }
+
+                Err(err) => {
+                    eprintln!("crbsh: {}: {}", err.command, err.message);
+                    shell.exit_code = 127;
+                }
+            }
+        }
+
+        ParsedInput::BackgroundPipeline { pipeline, command } => {
+            if pipeline.commands.is_empty() {
+                shell.exit_code = 0;
+                return ControlFlow::Continue;
+            }
+
+            match executor::execute_background_pipeline(shell, &pipeline, command) {
+                Ok((id, pid)) => {
+                    println!("[{id}] {pid}");
+                    shell.exit_code = 0;
                 }
 
                 Err(err) => {

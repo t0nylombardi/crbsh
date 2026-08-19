@@ -3,6 +3,7 @@ pub mod registry;
 pub mod cd;
 pub mod exit;
 pub mod export;
+pub mod jobs;
 pub mod print;
 pub mod set;
 pub mod unset;

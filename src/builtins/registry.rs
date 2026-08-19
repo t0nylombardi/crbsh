@@ -19,6 +19,7 @@ impl BuiltinRegistry {
         registry.register("cd", super::cd::run);
         registry.register("exit", super::exit::run);
         registry.register("export", super::export::run);
+        registry.register("jobs", super::jobs::run);
         registry.register("print", super::print::run);
         registry.register("set", super::set::run);
         registry.register("unset", super::unset::run);

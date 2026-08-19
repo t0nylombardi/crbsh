@@ -96,6 +96,10 @@ pub struct Pipeline {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParsedInput {
     Pipeline(Pipeline),
+    BackgroundPipeline {
+        pipeline: Pipeline,
+        command: String,
+    },
     FunctionDefinition {
         name: String,
         definition: FunctionDefinition,
@@ -270,10 +274,36 @@ pub fn parse(input: &str) -> Result<ParsedInput, ParseError> {
         return parse_function(input);
     }
 
-    let tokens = tokenize(input)?;
+    let mut tokens = tokenize(input)?;
 
     if tokens.is_empty() {
         return Err(ParseError::EmptyCommand);
+    }
+
+    if tokens
+        .iter()
+        .any(|token| matches!(token, Token::Background))
+    {
+        if !matches!(tokens.last(), Some(Token::Background)) {
+            return Err(ParseError::UnexpectedToken(Token::Background));
+        }
+
+        tokens.pop();
+
+        if tokens.is_empty() {
+            return Err(ParseError::UnexpectedToken(Token::Background));
+        }
+
+        let command = input
+            .strip_suffix('&')
+            .map(str::trim)
+            .unwrap_or(input)
+            .into();
+
+        return Ok(ParsedInput::BackgroundPipeline {
+            pipeline: parse_pipeline(tokens)?,
+            command,
+        });
     }
 
     match tokens.as_slice() {
@@ -1320,6 +1350,37 @@ fn parses_pipeline() {
 }
 
 #[test]
+fn parses_background_command() {
+    let result = parse("sleep 10 &");
+
+    assert_eq!(
+        result,
+        Ok(ParsedInput::BackgroundPipeline {
+            command: "sleep 10".into(),
+            pipeline: Pipeline {
+                commands: vec![ParsedCommand {
+                    name: "sleep".into(),
+                    args: vec![Value::Int(10).into()],
+                    redirections: Redirections::default(),
+                }],
+            },
+        })
+    );
+}
+
+#[test]
+fn parses_background_pipeline() {
+    let result = parse("ls | grep rs &").unwrap();
+
+    let ParsedInput::BackgroundPipeline { pipeline, command } = result else {
+        panic!("expected background pipeline");
+    };
+
+    assert_eq!(command, "ls | grep rs");
+    assert_eq!(pipeline.commands.len(), 2);
+}
+
+#[test]
 fn parses_boolean_words_as_command_names_in_command_position() {
     let result = parse("true | false").unwrap();
 
@@ -1990,6 +2051,27 @@ fn rejects_adjacent_pipes() {
     let result = parse("ls || grep");
 
     assert_eq!(result, Err(ParseError::UnexpectedToken(Token::Pipe)));
+}
+
+#[test]
+fn rejects_leading_background_operator() {
+    let result = parse("& sleep 10");
+
+    assert_eq!(result, Err(ParseError::UnexpectedToken(Token::Background)));
+}
+
+#[test]
+fn rejects_background_operator_before_argument() {
+    let result = parse("sleep & 10");
+
+    assert_eq!(result, Err(ParseError::UnexpectedToken(Token::Background)));
+}
+
+#[test]
+fn rejects_background_operator_before_command() {
+    let result = parse("sleep & ls");
+
+    assert_eq!(result, Err(ParseError::UnexpectedToken(Token::Background)));
 }
 
 #[test]

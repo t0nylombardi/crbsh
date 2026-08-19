@@ -4,6 +4,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Stdio};
 
 use crate::builtins;
+use crate::jobs::JobId;
 use crate::parser::{ParsedCommand, Pipeline};
 use crate::shell::{Shell, ShellError};
 
@@ -135,6 +136,162 @@ pub fn execute_pipeline(shell: &Shell, pipeline: &Pipeline) -> Result<i32, Execu
     Ok(exit_code)
 }
 
+pub fn execute_background_pipeline(
+    shell: &mut Shell,
+    pipeline: &Pipeline,
+    command: String,
+) -> Result<(JobId, u32), ExecutionError> {
+    let mut children = spawn_pipeline(shell, pipeline, true)?;
+
+    if children.is_empty() {
+        return Err(ExecutionError {
+            command,
+            message: "background jobs require an external command".into(),
+        });
+    }
+
+    let pid = children
+        .first()
+        .map(std::process::Child::id)
+        .expect("checked background pipeline has at least one child");
+    let id = shell.jobs.add(command, std::mem::take(&mut children));
+
+    Ok((id, pid))
+}
+
+fn spawn_pipeline(
+    shell: &Shell,
+    pipeline: &Pipeline,
+    background: bool,
+) -> Result<Vec<std::process::Child>, ExecutionError> {
+    if pipeline.commands.len() == 1 {
+        let command = &pipeline.commands[0];
+
+        if shell.builtins.get(&command.name).is_some() {
+            return Err(ExecutionError {
+                command: command.name.clone(),
+                message: "builtins cannot be run as background jobs".into(),
+            });
+        }
+
+        let mut process = external_process(shell, command)?;
+
+        if background && command.redirections.stdin.is_none() {
+            process.stdin(Stdio::null());
+        }
+
+        return process
+            .spawn()
+            .map(|child| vec![child])
+            .map_err(|source| ExecutionError {
+                command: command.name.clone(),
+                message: source.to_string(),
+            });
+    }
+
+    let mut children = ChildCleanup::new();
+    let mut initial_input = None;
+    let mut initial_stdin = None;
+    let mut previous_stdout = None;
+    let start_index = match pipeline.commands.first() {
+        Some(command) if command.name == "print" => {
+            initial_input = Some(print_output(shell, command)?.into_bytes());
+            1
+        }
+        _ => 0,
+    };
+    let last_index = pipeline.commands.len().saturating_sub(1);
+
+    for (index, command) in pipeline.commands.iter().enumerate().skip(start_index) {
+        let uses_initial_input = initial_input.is_some() && index == start_index;
+
+        if shell.builtins.get(&command.name).is_some() {
+            return Err(ExecutionError {
+                command: command.name.clone(),
+                message: "builtins are not supported in this pipeline position".into(),
+            });
+        }
+
+        let mut process = Command::new(&command.name);
+        let args = match resolved_args(shell, command) {
+            Ok(args) => args,
+            Err(err) => {
+                children.cleanup();
+                return Err(err);
+            }
+        };
+
+        process.args(args).envs(shell.environment_overrides());
+
+        if let Some(path) = &command.redirections.stdin {
+            let input = match File::open(path) {
+                Ok(input) => input,
+                Err(source) => {
+                    children.cleanup();
+                    return Err(ExecutionError {
+                        command: command.name.clone(),
+                        message: source.to_string(),
+                    });
+                }
+            };
+            process.stdin(Stdio::from(input));
+        } else if uses_initial_input {
+            process.stdin(Stdio::piped());
+        } else if let Some(stdout) = previous_stdout.take() {
+            process.stdin(Stdio::from(stdout));
+        } else if background && index == start_index {
+            process.stdin(Stdio::null());
+        }
+
+        if let Some(output) = command.redirections.stdout.as_ref() {
+            let output = match output_file(command, &output.target, output.append) {
+                Ok(output) => output,
+                Err(err) => {
+                    children.cleanup();
+                    return Err(err);
+                }
+            };
+            process.stdout(Stdio::from(output));
+        } else if index != last_index {
+            process.stdout(Stdio::piped());
+        }
+
+        let mut child = match process.spawn() {
+            Ok(child) => child,
+            Err(source) => {
+                children.cleanup();
+                return Err(ExecutionError {
+                    command: command.name.clone(),
+                    message: source.to_string(),
+                });
+            }
+        };
+
+        if uses_initial_input {
+            initial_stdin = child.stdin.take();
+        }
+
+        if index != last_index {
+            previous_stdout = child.stdout.take();
+        }
+
+        children.push(child);
+    }
+
+    if let Some(input) = initial_input.take()
+        && let Some(mut stdin) = initial_stdin.take()
+        && let Err(source) = stdin.write_all(&input)
+    {
+        children.cleanup();
+        return Err(ExecutionError {
+            command: "<pipeline>".into(),
+            message: source.to_string(),
+        });
+    }
+
+    Ok(children.into_children())
+}
+
 struct ChildCleanup {
     children: Vec<std::process::Child>,
 }
@@ -175,7 +332,7 @@ fn status_exit_code(status: std::process::ExitStatus) -> i32 {
         .unwrap_or(1)
 }
 
-fn execute_single_external(shell: &Shell, command: &ParsedCommand) -> Result<i32, ExecutionError> {
+fn external_process(shell: &Shell, command: &ParsedCommand) -> Result<Command, ExecutionError> {
     let mut process = Command::new(&command.name);
     process
         .args(resolved_args(shell, command)?)
@@ -196,6 +353,12 @@ fn execute_single_external(shell: &Shell, command: &ParsedCommand) -> Result<i32
             output.append,
         )?));
     }
+
+    Ok(process)
+}
+
+fn execute_single_external(shell: &Shell, command: &ParsedCommand) -> Result<i32, ExecutionError> {
+    let mut process = external_process(shell, command)?;
 
     let status = process.status().map_err(|source| ExecutionError {
         command: command.name.clone(),
@@ -266,11 +429,12 @@ mod tests {
     use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use crate::jobs::JobState;
     use crate::parser::{OutputRedirection, ParsedCommand, Pipeline, Redirections};
     use crate::shell::Shell;
     use crate::value::Value;
 
-    use super::{execute_pipeline, status_exit_code};
+    use super::{execute_background_pipeline, execute_pipeline, status_exit_code};
 
     #[test]
     fn redirects_print_output_to_file() {
@@ -628,6 +792,82 @@ mod tests {
             error.message,
             "builtins are not supported in this pipeline position"
         );
+    }
+
+    #[test]
+    fn starts_background_external_command_without_waiting() {
+        let mut shell = Shell::new();
+
+        let (id, pid) = execute_background_pipeline(
+            &mut shell,
+            &Pipeline {
+                commands: vec![ParsedCommand {
+                    name: "sleep".into(),
+                    args: vec![Value::String("0.1".into()).into()],
+                    redirections: Redirections::default(),
+                }],
+            },
+            "sleep 0.1".into(),
+        )
+        .unwrap();
+
+        assert_eq!(id, 1);
+        assert!(pid > 0);
+
+        let statuses = shell.jobs.statuses();
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].state, JobState::Running);
+        assert_eq!(statuses[0].command, "sleep 0.1");
+    }
+
+    #[test]
+    fn starts_background_pipeline() {
+        let mut shell = Shell::new();
+
+        let (id, pid) = execute_background_pipeline(
+            &mut shell,
+            &Pipeline {
+                commands: vec![
+                    ParsedCommand {
+                        name: "printf".into(),
+                        args: vec![Value::String("crab\n".into()).into()],
+                        redirections: Redirections::default(),
+                    },
+                    ParsedCommand {
+                        name: "grep".into(),
+                        args: vec!["crab".into()],
+                        redirections: Redirections::default(),
+                    },
+                ],
+            },
+            "printf crab | grep crab".into(),
+        )
+        .unwrap();
+
+        assert_eq!(id, 1);
+        assert!(pid > 0);
+        assert_eq!(shell.jobs.statuses()[0].command, "printf crab | grep crab");
+    }
+
+    #[test]
+    fn rejects_background_builtin() {
+        let mut shell = Shell::new();
+
+        let error = execute_background_pipeline(
+            &mut shell,
+            &Pipeline {
+                commands: vec![ParsedCommand {
+                    name: "jobs".into(),
+                    args: Vec::new(),
+                    redirections: Redirections::default(),
+                }],
+            },
+            "jobs".into(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.command, "jobs");
+        assert_eq!(error.message, "builtins cannot be run as background jobs");
     }
 
     #[test]

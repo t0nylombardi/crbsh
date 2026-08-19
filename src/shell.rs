@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::builtins::registry::BuiltinRegistry;
+use crate::jobs::JobManager;
 use crate::parser::{BinaryOperator, Expression, FunctionDefinition};
 use crate::value::{TypeName, Value};
 
@@ -27,6 +28,7 @@ pub enum ShellError {
 
 pub struct Shell {
     pub builtins: BuiltinRegistry,
+    pub jobs: JobManager,
     pub exit_code: i32,
     scopes: Vec<HashMap<String, Value>>,
     functions: HashMap<String, FunctionDefinition>,
@@ -37,6 +39,7 @@ impl Shell {
     pub fn new() -> Self {
         Self {
             builtins: BuiltinRegistry::new(),
+            jobs: JobManager::new(),
             exit_code: 0,
             scopes: vec![HashMap::new()],
             functions: HashMap::new(),
