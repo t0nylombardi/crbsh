@@ -93,9 +93,19 @@ pub struct Pipeline {
     pub commands: Vec<ParsedCommand>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipelineConnector {
+    And,
+    Or,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParsedInput {
     Pipeline(Pipeline),
+    PipelineChain {
+        first: Pipeline,
+        rest: Vec<(PipelineConnector, Pipeline)>,
+    },
     BackgroundPipeline {
         pipeline: Pipeline,
         command: String,
@@ -306,6 +316,13 @@ pub fn parse(input: &str) -> Result<ParsedInput, ParseError> {
         });
     }
 
+    if tokens
+        .iter()
+        .any(|token| matches!(token, Token::AndIf | Token::OrIf))
+    {
+        return parse_pipeline_chain(tokens);
+    }
+
     match tokens.as_slice() {
         [Token::Word(keyword), rest @ ..] if keyword == "let" => {
             return parse_let(rest);
@@ -337,6 +354,58 @@ pub fn parse(input: &str) -> Result<ParsedInput, ParseError> {
     }
 
     parse_pipeline(tokens).map(ParsedInput::Pipeline)
+}
+
+fn parse_pipeline_chain(tokens: Vec<Token>) -> Result<ParsedInput, ParseError> {
+    let mut segments = Vec::new();
+    let mut connectors = Vec::new();
+    let mut current = Vec::new();
+
+    for token in tokens {
+        match token {
+            Token::AndIf | Token::OrIf => {
+                if current.is_empty() {
+                    return Err(ParseError::UnexpectedToken(token));
+                }
+
+                connectors.push(pipeline_connector(&token));
+                segments.push(std::mem::take(&mut current));
+            }
+            token => current.push(token),
+        }
+    }
+
+    if current.is_empty() {
+        return Err(ParseError::UnexpectedToken(connector_token(
+            *connectors.last().expect("chain has at least one connector"),
+        )));
+    }
+
+    segments.push(current);
+
+    let mut pipelines = segments
+        .into_iter()
+        .map(parse_pipeline)
+        .collect::<Result<Vec<_>, _>>()?;
+    let first = pipelines.remove(0);
+    let rest = connectors.into_iter().zip(pipelines).collect();
+
+    Ok(ParsedInput::PipelineChain { first, rest })
+}
+
+fn pipeline_connector(token: &Token) -> PipelineConnector {
+    match token {
+        Token::AndIf => PipelineConnector::And,
+        Token::OrIf => PipelineConnector::Or,
+        _ => unreachable!("pipeline connector checked by caller"),
+    }
+}
+
+fn connector_token(connector: PipelineConnector) -> Token {
+    match connector {
+        PipelineConnector::And => Token::AndIf,
+        PipelineConnector::Or => Token::OrIf,
+    }
 }
 
 fn parse_if(input: &str) -> Result<ParsedInput, ParseError> {
@@ -1247,6 +1316,8 @@ fn token_description(token: &Token) -> String {
         Token::RightBrace => "'}'".into(),
         Token::Wildcard => "'_'".into(),
         Token::Pipe => "'|'".into(),
+        Token::AndIf => "'&&'".into(),
+        Token::OrIf => "'||'".into(),
         Token::RedirectOut => "'>'".into(),
         Token::RedirectAppend => "'>>'".into(),
         Token::RedirectIn => "'<'".into(),
@@ -1378,6 +1449,43 @@ fn parses_background_pipeline() {
 
     assert_eq!(command, "ls | grep rs");
     assert_eq!(pipeline.commands.len(), 2);
+}
+
+#[test]
+fn parses_pipeline_conditional_chain() {
+    let result = parse(r#"cat foo.txt | grep crab && print "found it""#).unwrap();
+
+    let ParsedInput::PipelineChain { first, rest } = result else {
+        panic!("expected pipeline chain");
+    };
+
+    assert_eq!(first.commands.len(), 2);
+    assert_eq!(rest.len(), 1);
+    assert_eq!(rest[0].0, PipelineConnector::And);
+    assert_eq!(
+        rest[0].1,
+        Pipeline {
+            commands: vec![ParsedCommand {
+                name: "print".into(),
+                args: vec![Value::String("found it".into()).into()],
+                redirections: Redirections::default(),
+            }],
+        }
+    );
+}
+
+#[test]
+fn rejects_missing_pipeline_after_conditional_connector() {
+    let result = parse("cargo build &&");
+
+    assert_eq!(result, Err(ParseError::UnexpectedToken(Token::AndIf)));
+}
+
+#[test]
+fn rejects_missing_pipeline_before_conditional_connector() {
+    let result = parse("&& print ok");
+
+    assert_eq!(result, Err(ParseError::UnexpectedToken(Token::AndIf)));
 }
 
 #[test]
@@ -2048,7 +2156,7 @@ fn rejects_trailing_pipe() {
 
 #[test]
 fn rejects_adjacent_pipes() {
-    let result = parse("ls || grep");
+    let result = parse("ls | | grep");
 
     assert_eq!(result, Err(ParseError::UnexpectedToken(Token::Pipe)));
 }

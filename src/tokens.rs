@@ -25,6 +25,8 @@ pub enum Token {
     RightBrace,
     Wildcard,
     Pipe,
+    AndIf,
+    OrIf,
     RedirectOut,
     RedirectAppend,
     RedirectIn,
@@ -83,7 +85,13 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, TokenizeError> {
 
             '|' if !in_single_quotes && !in_double_quotes => {
                 push_word(&mut tokens, &mut current, &mut quoted);
-                tokens.push(Token::Pipe);
+
+                if matches!(chars.peek(), Some('|')) {
+                    chars.next();
+                    tokens.push(Token::OrIf);
+                } else {
+                    tokens.push(Token::Pipe);
+                }
             }
 
             '>' if !in_single_quotes && !in_double_quotes => {
@@ -113,7 +121,13 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, TokenizeError> {
 
             '&' if !in_single_quotes && !in_double_quotes => {
                 push_word(&mut tokens, &mut current, &mut quoted);
-                tokens.push(Token::Background);
+
+                if matches!(chars.peek(), Some('&')) {
+                    chars.next();
+                    tokens.push(Token::AndIf);
+                } else {
+                    tokens.push(Token::Background);
+                }
             }
 
             '=' if !in_single_quotes && !in_double_quotes => {
@@ -352,6 +366,25 @@ mod tests {
                 Token::Word("sleep".into()),
                 Token::IntLiteral(10),
                 Token::Background,
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenizes_pipeline_conditionals() {
+        let tokens = tokenize(r#"cargo build && print "ok" || print "failed""#).unwrap();
+
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Word("cargo".into()),
+                Token::Word("build".into()),
+                Token::AndIf,
+                Token::Word("print".into()),
+                Token::StringLiteral("ok".into()),
+                Token::OrIf,
+                Token::Word("print".into()),
+                Token::StringLiteral("failed".into()),
             ]
         );
     }

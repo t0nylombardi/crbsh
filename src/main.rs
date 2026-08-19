@@ -12,7 +12,7 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use builtins::BuiltinOutcome;
-use parser::{Expression, Iterable, ParsedInput};
+use parser::{Expression, Iterable, ParsedInput, Pipeline, PipelineConnector};
 use shell::{Shell, ShellError};
 use value::TypeName;
 use value::Value;
@@ -407,86 +407,29 @@ fn execute_input(shell: &mut Shell, parsed_input: ParsedInput) -> ControlFlow {
             }
         }
 
-        ParsedInput::Pipeline(pipeline) => {
-            let parsed = match pipeline.commands.first() {
-                Some(command) => command,
-                None => {
-                    shell.exit_code = 0;
-                    return ControlFlow::Continue;
-                }
-            };
+        ParsedInput::Pipeline(pipeline) => return execute_pipeline_input(shell, pipeline),
 
-            let command = &parsed.name;
-            let args = &parsed.args;
+        ParsedInput::PipelineChain { first, rest } => {
+            let flow = execute_pipeline_input(shell, first);
 
-            if pipeline.commands.len() == 1
-                && parsed.redirections.is_empty()
-                && shell.function(command).is_some()
-            {
-                let result = execute_function_call(shell, command, args);
-
-                match result {
-                    Ok(_) => shell.exit_code = 0,
-                    Err(err) => {
-                        eprintln!("crbsh: {err}");
-                        shell.exit_code = 2;
-                    }
-                }
-
-                return ControlFlow::Continue;
+            if !matches!(flow, ControlFlow::Continue) {
+                return flow;
             }
 
-            if pipeline.commands.len() == 1
-                && parsed.redirections.is_empty()
-                && let Some(builtin) = shell.builtins.get(command)
-            {
-                let resolved_args = if uses_raw_builtin_args(command) {
-                    args.iter().map(raw_builtin_arg).collect()
-                } else {
-                    args.iter()
-                        .map(|arg| shell.resolve_argument(arg))
-                        .collect::<Result<Vec<_>, _>>()
+            for (connector, pipeline) in rest {
+                let should_execute = match connector {
+                    PipelineConnector::And => shell.exit_code == 0,
+                    PipelineConnector::Or => shell.exit_code != 0,
                 };
 
-                let resolved_args = match resolved_args {
-                    Ok(args) => args,
-                    Err(err) => {
-                        eprintln!("crbsh: {err}");
-                        shell.exit_code = 1;
-                        return ControlFlow::Continue;
-                    }
-                };
-
-                match builtin(shell, &resolved_args) {
-                    Ok(BuiltinOutcome::Continue) => {
-                        shell.exit_code = 0;
-                    }
-
-                    Ok(BuiltinOutcome::ContinueWithStatus(code)) => {
-                        shell.exit_code = code;
-                    }
-
-                    Ok(BuiltinOutcome::Exit(code)) => {
-                        return ControlFlow::Exit(code);
-                    }
-
-                    Err(err) => {
-                        eprintln!("crbsh: {}", err.message);
-                        shell.exit_code = 1;
-                    }
+                if !should_execute {
+                    continue;
                 }
 
-                return ControlFlow::Continue;
-            }
+                let flow = execute_pipeline_input(shell, pipeline);
 
-            match executor::execute_pipeline(shell, &pipeline) {
-                Ok(code) => {
-                    shell.exit_code = code;
-                }
-
-                Err(err) => {
-                    eprintln!("crbsh: {}: {}", err.command, err.message);
-                    shell.exit_code = 127;
+                if !matches!(flow, ControlFlow::Continue) {
+                    return flow;
                 }
             }
         }
@@ -508,6 +451,92 @@ fn execute_input(shell: &mut Shell, parsed_input: ParsedInput) -> ControlFlow {
                     shell.exit_code = 127;
                 }
             }
+        }
+    }
+
+    ControlFlow::Continue
+}
+
+fn execute_pipeline_input(shell: &mut Shell, pipeline: Pipeline) -> ControlFlow {
+    let parsed = match pipeline.commands.first() {
+        Some(command) => command,
+        None => {
+            shell.exit_code = 0;
+            return ControlFlow::Continue;
+        }
+    };
+
+    let command = &parsed.name;
+    let args = &parsed.args;
+
+    if pipeline.commands.len() == 1
+        && parsed.redirections.is_empty()
+        && shell.function(command).is_some()
+    {
+        let result = execute_function_call(shell, command, args);
+
+        match result {
+            Ok(_) => shell.exit_code = 0,
+            Err(err) => {
+                eprintln!("crbsh: {err}");
+                shell.exit_code = 2;
+            }
+        }
+
+        return ControlFlow::Continue;
+    }
+
+    if pipeline.commands.len() == 1
+        && parsed.redirections.is_empty()
+        && let Some(builtin) = shell.builtins.get(command)
+    {
+        let resolved_args = if uses_raw_builtin_args(command) {
+            args.iter().map(raw_builtin_arg).collect()
+        } else {
+            args.iter()
+                .map(|arg| shell.resolve_argument(arg))
+                .collect::<Result<Vec<_>, _>>()
+        };
+
+        let resolved_args = match resolved_args {
+            Ok(args) => args,
+            Err(err) => {
+                eprintln!("crbsh: {err}");
+                shell.exit_code = 1;
+                return ControlFlow::Continue;
+            }
+        };
+
+        match builtin(shell, &resolved_args) {
+            Ok(BuiltinOutcome::Continue) => {
+                shell.exit_code = 0;
+            }
+
+            Ok(BuiltinOutcome::ContinueWithStatus(code)) => {
+                shell.exit_code = code;
+            }
+
+            Ok(BuiltinOutcome::Exit(code)) => {
+                return ControlFlow::Exit(code);
+            }
+
+            Err(err) => {
+                eprintln!("crbsh: {}", err.message);
+                shell.exit_code = 1;
+            }
+        }
+
+        return ControlFlow::Continue;
+    }
+
+    match executor::execute_pipeline(shell, &pipeline) {
+        Ok(code) => {
+            shell.exit_code = code;
+        }
+
+        Err(err) => {
+            eprintln!("crbsh: {}: {}", err.command, err.message);
+            shell.exit_code = 127;
         }
     }
 
@@ -1169,6 +1198,75 @@ let total = add(2, 3)
         assert!(shell.environment_overrides().next().is_none());
     }
 
+    #[test]
+    fn and_connector_runs_next_pipeline_after_success() {
+        let output = temp_output_path("and_connector_runs_next_pipeline_after_success");
+        let mut shell = Shell::new();
+
+        run(
+            &mut shell,
+            &format!(r#"true && print "build passed" > {}"#, output.display()),
+        );
+
+        assert_eq!(fs::read_to_string(&output).unwrap(), "build passed\n");
+        fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn and_connector_skips_next_pipeline_after_failure() {
+        let output = temp_output_path("and_connector_skips_next_pipeline_after_failure");
+        let mut shell = Shell::new();
+        let parsed = parser::parse(&format!(
+            r#"false && print "skipped" > {}"#,
+            output.display()
+        ))
+        .unwrap();
+
+        assert!(matches!(
+            execute_input(&mut shell, parsed),
+            ControlFlow::Continue
+        ));
+
+        assert_eq!(shell.exit_code, 1);
+        assert!(!output.exists());
+    }
+
+    #[test]
+    fn or_connector_runs_next_pipeline_after_failure() {
+        let output = temp_output_path("or_connector_runs_next_pipeline_after_failure");
+        let mut shell = Shell::new();
+
+        run(
+            &mut shell,
+            &format!(r#"false || print "command failed" > {}"#, output.display()),
+        );
+
+        assert_eq!(fs::read_to_string(&output).unwrap(), "command failed\n");
+        fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn conditional_connector_uses_previous_pipeline_exit_status() {
+        let dir = temp_output_path("conditional_connector_uses_previous_pipeline_exit_status");
+        let input = dir.with_extension("txt");
+        let output = dir.with_extension("out");
+        fs::write(&input, "blue\ncrab\n").unwrap();
+
+        let mut shell = Shell::new();
+        run(
+            &mut shell,
+            &format!(
+                r#"cat {} | grep -q crab && print "found it" > {}"#,
+                input.display(),
+                output.display()
+            ),
+        );
+
+        assert_eq!(fs::read_to_string(&output).unwrap(), "found it\n");
+        fs::remove_file(input).unwrap();
+        fs::remove_file(output).unwrap();
+    }
+
     fn run(shell: &mut Shell, input: &str) {
         let parsed = parser::parse(input).unwrap();
         assert!(matches!(
@@ -1197,6 +1295,17 @@ let total = add(2, 3)
             .as_nanos();
 
         path.push(format!("crbsh-{name}-{unique}.crbshrc"));
+        path
+    }
+
+    fn temp_output_path(name: &str) -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+
+        path.push(format!("crbsh-{name}-{unique}"));
         path
     }
 }
