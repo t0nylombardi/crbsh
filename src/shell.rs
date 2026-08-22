@@ -100,6 +100,8 @@ impl Shell {
             .transpose()
     }
 
+    /// Adds a lexical block scope. Variable lookup walks these frames from the
+    /// innermost block toward the outermost visible scope.
     pub fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
     }
@@ -110,13 +112,16 @@ impl Shell {
         }
     }
 
-    pub fn isolate_function_scopes(&mut self) -> Vec<HashMap<String, Value>> {
+    /// Replaces the caller's local scopes with a fresh function scope while
+    /// keeping the global scope visible. The returned scopes must be restored
+    /// after the function finishes.
+    pub fn enter_function_scope(&mut self) -> Vec<HashMap<String, Value>> {
         let global_scope = self.scopes.first().cloned().unwrap_or_default();
 
         std::mem::replace(&mut self.scopes, vec![global_scope, HashMap::new()])
     }
 
-    pub fn restore_scopes(&mut self, scopes: Vec<HashMap<String, Value>>) {
+    pub fn restore_caller_scopes(&mut self, scopes: Vec<HashMap<String, Value>>) {
         self.scopes = scopes;
     }
 
@@ -665,6 +670,50 @@ mod tests {
             shell.evaluate(&Expression::Identifier("x".into())),
             Ok(Value::Int(20))
         );
+    }
+
+    #[test]
+    fn function_and_block_scopes_resolve_inside_out() {
+        let mut shell = Shell::new();
+
+        shell
+            .declare_variable("global", None, Value::Int(10))
+            .unwrap();
+        let caller_scopes = shell.enter_function_scope();
+        shell.declare_variable("x", None, Value::Int(5)).unwrap();
+        shell.declare_variable("a", None, Value::Int(1)).unwrap();
+        shell.push_scope();
+        shell.declare_variable("b", None, Value::Int(2)).unwrap();
+
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("global".into())),
+            Ok(Value::Int(10))
+        );
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("x".into())),
+            Ok(Value::Int(5))
+        );
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("a".into())),
+            Ok(Value::Int(1))
+        );
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("b".into())),
+            Ok(Value::Int(2))
+        );
+
+        shell.pop_scope();
+
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("a".into())),
+            Ok(Value::Int(1))
+        );
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("b".into())),
+            Err(ShellError::UndefinedVariable("b".into()))
+        );
+
+        shell.restore_caller_scopes(caller_scopes);
     }
 
     #[test]

@@ -945,7 +945,7 @@ fn execute_function_call(
         .map(|arg| evaluate_expression(shell, arg).map_err(|err| err.to_string()))
         .collect::<Result<Vec<_>, _>>()?;
 
-    let caller_scopes = shell.isolate_function_scopes();
+    let caller_scopes = shell.enter_function_scope();
 
     let mut setup_error = None;
     for (param, value) in function.params.iter().zip(values) {
@@ -966,12 +966,12 @@ fn execute_function_call(
     }
 
     if let Some(err) = setup_error {
-        shell.restore_scopes(caller_scopes);
+        shell.restore_caller_scopes(caller_scopes);
         return Err(err);
     }
 
     let flow = execute_block(shell, function.body);
-    shell.restore_scopes(caller_scopes);
+    shell.restore_caller_scopes(caller_scopes);
 
     match flow {
         ControlFlow::Return(value) => enforce_return_type(name, function.return_type, value),
@@ -1168,6 +1168,78 @@ fn test(x: int) -> int {
             shell.evaluate(&Expression::Identifier("y".into())),
             Err(ShellError::UndefinedVariable(_))
         ));
+    }
+
+    #[test]
+    fn function_scope_shadows_globals_and_does_not_leak_locals() {
+        let mut shell = Shell::new();
+
+        run(&mut shell, "let x = 10");
+        run(
+            &mut shell,
+            r#"
+fn example(x: int) {
+    let local = 20
+    let parameter_copy = x
+}
+"#,
+        );
+
+        assert_eq!(
+            execute_function_call(&mut shell, "example", &[Value::Int(5).into()]),
+            Ok(None)
+        );
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("x".into())),
+            Ok(Value::Int(10))
+        );
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("local".into())),
+            Err(ShellError::UndefinedVariable("local".into()))
+        );
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("parameter_copy".into())),
+            Err(ShellError::UndefinedVariable("parameter_copy".into()))
+        );
+    }
+
+    #[test]
+    fn nested_blocks_layer_on_function_scope() {
+        let mut shell = Shell::new();
+
+        run(&mut shell, "let global = 10");
+        run(
+            &mut shell,
+            r#"
+fn test(x: int) -> int {
+    let a = 1
+
+    if true {
+        let b = 2
+        let inside = global + x + a + b
+    }
+
+    return global + x + a
+}
+"#,
+        );
+
+        assert_eq!(
+            execute_function_call(&mut shell, "test", &[Value::Int(5).into()]),
+            Ok(Some(Value::Int(16)))
+        );
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("a".into())),
+            Err(ShellError::UndefinedVariable("a".into()))
+        );
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("b".into())),
+            Err(ShellError::UndefinedVariable("b".into()))
+        );
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("inside".into())),
+            Err(ShellError::UndefinedVariable("inside".into()))
+        );
     }
 
     #[test]
