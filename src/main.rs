@@ -949,16 +949,17 @@ fn execute_function_call(
 
     let mut setup_error = None;
     for (param, value) in function.params.iter().zip(values) {
-        if value.type_name() != param.type_name {
+        if let Some(expected) = param.type_annotation
+            && value.type_name() != expected
+        {
             setup_error = Some(format!(
-                "type mismatch: expected {}, found {}",
-                param.type_name,
+                "type mismatch: expected {expected}, found {}",
                 value.type_name()
             ));
             break;
         }
 
-        if let Err(err) = shell.declare_variable(&param.name, Some(param.type_name), value) {
+        if let Err(err) = shell.declare_variable(&param.name, param.type_annotation, value) {
             setup_error = Some(err.to_string());
             break;
         }
@@ -1029,6 +1030,56 @@ fn add(a: int, b: int) -> int {
         assert_eq!(
             shell.evaluate(&Expression::Identifier("total".into())),
             Ok(Value::Int(5))
+        );
+    }
+
+    #[test]
+    fn inferred_parameter_accepts_the_argument_value_type() {
+        let mut shell = Shell::new();
+
+        run(
+            &mut shell,
+            r#"
+fn consume(value) {
+    let copy = value
+}
+"#,
+        );
+
+        assert_eq!(
+            execute_function_call(&mut shell, "consume", &[Value::Int(7).into()]),
+            Ok(None)
+        );
+        assert_eq!(
+            execute_function_call(
+                &mut shell,
+                "consume",
+                &[Expression::Literal(Value::String("crab".into()))],
+            ),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn typed_parameter_rejects_the_wrong_argument_type() {
+        let mut shell = Shell::new();
+
+        run(
+            &mut shell,
+            r#"
+fn identity(value: int) -> int {
+    return value
+}
+"#,
+        );
+
+        assert_eq!(
+            execute_function_call(
+                &mut shell,
+                "identity",
+                &[Expression::Literal(Value::String("crab".into()))],
+            ),
+            Err("type mismatch: expected int, found string".into())
         );
     }
 
