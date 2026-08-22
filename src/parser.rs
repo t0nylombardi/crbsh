@@ -165,7 +165,7 @@ pub struct FunctionDefinition {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionParam {
     pub name: String,
-    pub type_name: TypeName,
+    pub type_annotation: Option<TypeName>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,6 +211,7 @@ pub enum ParseError {
     MissingAssignmentValue,
     MissingFunctionName,
     MissingParameterList,
+    MissingParameterType(String),
     MissingBlockEnd,
     MissingRedirectionTarget,
     MissingReturnType,
@@ -243,6 +244,9 @@ impl fmt::Display for ParseError {
             Self::MissingAssignmentValue => write!(formatter, "missing assignment value"),
             Self::MissingFunctionName => write!(formatter, "missing function name"),
             Self::MissingParameterList => write!(formatter, "missing parameter list"),
+            Self::MissingParameterType(name) => {
+                write!(formatter, "missing type for parameter '{name}'")
+            }
             Self::MissingBlockEnd => write!(formatter, "missing block end '}}'"),
             Self::MissingRedirectionTarget => write!(formatter, "missing redirection target"),
             Self::MissingReturnType => write!(formatter, "missing return type"),
@@ -586,6 +590,16 @@ fn parse_function(input: &str) -> Result<ParsedInput, ParseError> {
     let (body, end_index) = parse_block_body(&lines, 1)?;
     ensure_block_consumed(&lines, end_index)?;
 
+    if body.iter().any(contains_value_return) {
+        if return_type.is_none() {
+            return Err(ParseError::MissingReturnType);
+        }
+
+        if let Some(param) = params.iter().find(|param| param.type_annotation.is_none()) {
+            return Err(ParseError::MissingParameterType(param.name.clone()));
+        }
+    }
+
     Ok(ParsedInput::FunctionDefinition {
         name: name.into(),
         definition: FunctionDefinition {
@@ -594,6 +608,36 @@ fn parse_function(input: &str) -> Result<ParsedInput, ParseError> {
             body,
         },
     })
+}
+
+fn contains_value_return(statement: &ParsedInput) -> bool {
+    match statement {
+        ParsedInput::Return { value } => value.is_some(),
+        ParsedInput::If {
+            branches,
+            else_body,
+        } => {
+            branches
+                .iter()
+                .any(|branch| branch.body.iter().any(contains_value_return))
+                || else_body
+                    .as_ref()
+                    .is_some_and(|body| body.iter().any(contains_value_return))
+        }
+        ParsedInput::Match { arms, .. } => arms.iter().any(|arm| contains_value_return(&arm.body)),
+        ParsedInput::While { body, .. } | ParsedInput::For { body, .. } => {
+            body.iter().any(contains_value_return)
+        }
+        ParsedInput::FunctionDefinition { .. }
+        | ParsedInput::Pipeline(_)
+        | ParsedInput::PipelineChain { .. }
+        | ParsedInput::BackgroundPipeline { .. }
+        | ParsedInput::Let { .. }
+        | ParsedInput::Assignment { .. }
+        | ParsedInput::EnvironmentAssignment { .. }
+        | ParsedInput::Break
+        | ParsedInput::Continue => false,
+    }
 }
 
 fn ensure_block_consumed(lines: &[&str], end_index: usize) -> Result<(), ParseError> {
@@ -620,11 +664,10 @@ fn parse_function_params(input: &str) -> Result<Vec<FunctionParam>, ParseError> 
     input
         .split(',')
         .map(|param| {
-            let Some((name, type_name)) = param.trim().split_once(':') else {
-                return Err(ParseError::MissingParameterList);
-            };
-            let name = name.trim();
-            let type_name = type_name.trim();
+            let (name, type_name) = param.trim().split_once(':').map_or_else(
+                || (param.trim(), None),
+                |(name, type_name)| (name.trim(), Some(type_name.trim())),
+            );
 
             if !is_valid_identifier(name) {
                 return Err(ParseError::InvalidVariableName(name.into()));
@@ -634,13 +677,17 @@ fn parse_function_params(input: &str) -> Result<Vec<FunctionParam>, ParseError> 
                 return Err(ParseError::ReservedName(name.into()));
             }
 
-            let Some(type_name) = TypeName::parse(type_name) else {
-                return Err(ParseError::InvalidTypeName(type_name.into()));
+            let type_annotation = match type_name {
+                Some(type_name) => Some(
+                    TypeName::parse(type_name)
+                        .ok_or_else(|| ParseError::InvalidTypeName(type_name.into()))?,
+                ),
+                None => None,
             };
 
             Ok(FunctionParam {
                 name: name.into(),
-                type_name,
+                type_annotation,
             })
         })
         .collect()
@@ -2023,16 +2070,71 @@ fn add(a: int, b: int) -> int {
         vec![
             FunctionParam {
                 name: "a".into(),
-                type_name: TypeName::Int,
+                type_annotation: Some(TypeName::Int),
             },
             FunctionParam {
                 name: "b".into(),
-                type_name: TypeName::Int,
+                type_annotation: Some(TypeName::Int),
             },
         ]
     );
     assert_eq!(definition.return_type, Some(TypeName::Int));
     assert_eq!(definition.body.len(), 1);
+}
+
+#[test]
+fn parses_inferred_function_parameter() {
+    let result = parse(
+        r#"
+fn greet(name) {
+    print name
+}
+"#,
+    )
+    .unwrap();
+
+    let ParsedInput::FunctionDefinition { definition, .. } = result else {
+        panic!("expected function definition");
+    };
+
+    assert_eq!(
+        definition.params,
+        vec![FunctionParam {
+            name: "name".into(),
+            type_annotation: None,
+        }]
+    );
+}
+
+#[test]
+fn rejects_inferred_parameter_when_function_returns_a_value() {
+    let result = parse(
+        r#"
+fn identity(value) -> int {
+    return value
+}
+"#,
+    );
+
+    assert_eq!(
+        result,
+        Err(ParseError::MissingParameterType("value".into()))
+    );
+}
+
+#[test]
+fn rejects_value_return_without_a_return_type() {
+    let result = parse(
+        r#"
+fn identity(value: int) {
+    if value > 0 {
+        return value
+    }
+}
+"#,
+    );
+
+    assert_eq!(result, Err(ParseError::MissingReturnType));
 }
 
 #[test]
