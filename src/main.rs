@@ -1,7 +1,6 @@
 mod builtins;
 mod execution;
 mod history;
-mod lexer;
 mod parser;
 mod prompt;
 mod runtime;

@@ -61,6 +61,20 @@ cargo test
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
+## Workspace Architecture
+
+The repository is a Cargo workspace with two packages:
+
+- `crb-language` owns tokenization, parsing, language and command syntax,
+  native values, lexical scope state, function definitions, and native value
+  streams.
+- `crbsh` owns the executable shell host: Unix processes, byte-stream adapters,
+  redirection, jobs, builtins, environment integration, history, and the REPL.
+
+Structured pipelines cross that boundary explicitly. Native stages transform a
+`ValueStream`; the shell converts values to bytes before a Unix process and
+decodes process output when a later native stage needs values.
+
 ## Install
 
 ```sh

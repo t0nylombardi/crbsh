@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use super::{TypeName, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ScopeError {
+pub enum ScopeError {
     AlreadyDefined(String),
     NotDefined(String),
     TypeMismatch { expected: TypeName, found: TypeName },
@@ -15,7 +15,7 @@ struct Variable {
     type_annotation: Option<TypeName>,
 }
 
-pub(crate) struct ScopeStack {
+pub struct ScopeStack {
     frames: Vec<HashMap<String, Variable>>,
 }
 
@@ -104,7 +104,6 @@ impl ScopeStack {
         Ok(())
     }
 
-    #[cfg(test)]
     pub(crate) fn set(&mut self, name: String, value: Value) {
         self.frames
             .last_mut()

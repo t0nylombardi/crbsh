@@ -3,16 +3,16 @@ use std::collections::BTreeMap;
 use super::Value;
 
 #[derive(Debug, Default, PartialEq, Eq)]
-pub(crate) struct ValueStream {
+pub struct ValueStream {
     values: Vec<Value>,
 }
 
 impl ValueStream {
-    pub(crate) fn empty() -> Self {
+    pub fn empty() -> Self {
         Self::default()
     }
 
-    pub(crate) fn from_values(values: Vec<Value>) -> Self {
+    pub fn from_values(values: Vec<Value>) -> Self {
         Self {
             values: values
                 .into_iter()
@@ -24,32 +24,32 @@ impl ValueStream {
         }
     }
 
-    pub(crate) fn from_record(fields: BTreeMap<String, Value>) -> Self {
+    pub fn from_record(fields: BTreeMap<String, Value>) -> Self {
         Self {
             values: vec![Value::Record(fields)],
         }
     }
 
-    pub(crate) fn from_text_lines(values: Vec<Value>) -> Self {
+    pub fn from_text_lines(values: Vec<Value>) -> Self {
         Self { values }
     }
 
-    pub(crate) fn take(mut self, count: usize) -> Self {
+    pub fn take(mut self, count: usize) -> Self {
         self.values.truncate(count);
         self
     }
 
-    pub(crate) fn count(self) -> Result<Self, usize> {
+    pub fn count(self) -> Result<Self, usize> {
         i64::try_from(self.values.len())
             .map(|count| Self::from_text_lines(vec![Value::Int(count)]))
             .map_err(|_| self.values.len())
     }
 
-    pub(crate) fn collect(self) -> Self {
+    pub fn collect(self) -> Self {
         Self::from_text_lines(vec![Value::List(self.values)])
     }
 
-    pub(crate) fn into_values(self) -> Vec<Value> {
+    pub fn into_values(self) -> Vec<Value> {
         self.values
     }
 }
