@@ -15,11 +15,23 @@ use crate::shell::Shell;
 
 pub fn execute_pipeline(shell: &Shell, pipeline: &Pipeline) -> Result<i32, ExecutionError> {
     if structured::contains_structured_command(pipeline) {
-        let values = structured::execute_native_pipeline(shell, pipeline)?;
-        for value in values {
-            println!("{value}");
+        let output = structured::execute_structured_pipeline(shell, pipeline)?;
+        match output.data {
+            structured::PipelineData::Text(bytes) => {
+                std::io::stdout()
+                    .write_all(&bytes)
+                    .map_err(|error| ExecutionError {
+                        command: "<pipeline>".into(),
+                        message: error.to_string(),
+                    })?;
+            }
+            structured::PipelineData::Structured(values) => {
+                for value in values {
+                    println!("{value}");
+                }
+            }
         }
-        return Ok(0);
+        return Ok(output.exit_code);
     }
 
     if pipeline.commands.len() == 1 {

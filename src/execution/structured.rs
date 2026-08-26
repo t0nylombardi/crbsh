@@ -1,10 +1,14 @@
 use std::collections::BTreeMap;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 use crate::parser::{Expression, ParsedCommand, Pipeline};
 use crate::runtime::Value;
 use crate::shell::Shell;
 
 use super::ExecutionError;
+use super::command::resolved_args;
+use super::pipeline::status_exit_code;
 
 const STRUCTURED_COMMANDS: &[&str] = &["values", "record", "take", "count", "collect"];
 
@@ -15,20 +19,26 @@ pub(super) fn contains_structured_command(pipeline: &Pipeline) -> bool {
         .any(|command| STRUCTURED_COMMANDS.contains(&command.name.as_str()))
 }
 
-pub(super) fn execute_native_pipeline(
+#[derive(Debug)]
+pub(super) enum PipelineData {
+    Text(Vec<u8>),
+    Structured(Vec<Value>),
+}
+
+#[derive(Debug)]
+pub(super) struct StructuredPipelineOutput {
+    pub data: PipelineData,
+    pub exit_code: i32,
+}
+
+pub(super) fn execute_structured_pipeline(
     shell: &Shell,
     pipeline: &Pipeline,
-) -> Result<Vec<Value>, ExecutionError> {
+) -> Result<StructuredPipelineOutput, ExecutionError> {
     let mut stream = None;
+    let mut exit_code = 0;
 
     for (index, command) in pipeline.commands.iter().enumerate() {
-        if !STRUCTURED_COMMANDS.contains(&command.name.as_str()) {
-            return Err(stage_error(
-                index,
-                command,
-                "external command requires the structured pipeline adapter",
-            ));
-        }
         if !command.redirections.is_empty() {
             return Err(stage_error(
                 index,
@@ -37,29 +47,41 @@ pub(super) fn execute_native_pipeline(
             ));
         }
 
-        stream = Some(execute_stage(shell, index, command, stream)?);
+        if STRUCTURED_COMMANDS.contains(&command.name.as_str()) {
+            stream = Some(execute_stage(shell, index, command, stream)?);
+            exit_code = 0;
+        } else {
+            let output = execute_external_stage(shell, index, command, stream)?;
+            stream = Some(PipelineData::Text(output.stdout));
+            exit_code = output.exit_code;
+        }
     }
 
-    Ok(stream.unwrap_or_default())
+    Ok(StructuredPipelineOutput {
+        data: stream.unwrap_or_else(|| PipelineData::Structured(Vec::new())),
+        exit_code,
+    })
 }
 
 fn execute_stage(
     shell: &Shell,
     index: usize,
     command: &ParsedCommand,
-    input: Option<Vec<Value>>,
-) -> Result<Vec<Value>, ExecutionError> {
+    input: Option<PipelineData>,
+) -> Result<PipelineData, ExecutionError> {
     match command.name.as_str() {
         "values" => {
             require_no_input(index, command, &input)?;
             let values = evaluate_args(shell, index, command)?;
-            Ok(values
-                .into_iter()
-                .flat_map(|value| match value {
-                    Value::List(values) => values,
-                    value => vec![value],
-                })
-                .collect())
+            Ok(PipelineData::Structured(
+                values
+                    .into_iter()
+                    .flat_map(|value| match value {
+                        Value::List(values) => values,
+                        value => vec![value],
+                    })
+                    .collect(),
+            ))
         }
         "record" => {
             require_no_input(index, command, &input)?;
@@ -81,24 +103,26 @@ fn execute_stage(
                     .map_err(|error| stage_error(index, command, error.to_string()))?;
                 fields.insert(key, value);
             }
-            Ok(vec![Value::Record(fields)])
+            Ok(PipelineData::Structured(vec![Value::Record(fields)]))
         }
         "take" => {
             let mut values = require_input(index, command, input)?;
             let count = single_non_negative_integer(shell, index, command)?;
             values.truncate(count);
-            Ok(values)
+            Ok(PipelineData::Structured(values))
         }
         "count" => {
             require_no_args(index, command)?;
             let values = require_input(index, command, input)?;
             let count = i64::try_from(values.len())
                 .map_err(|_| stage_error(index, command, "stream length exceeds int range"))?;
-            Ok(vec![Value::Int(count)])
+            Ok(PipelineData::Structured(vec![Value::Int(count)]))
         }
         "collect" => {
             require_no_args(index, command)?;
-            Ok(vec![Value::List(require_input(index, command, input)?)])
+            Ok(PipelineData::Structured(vec![Value::List(require_input(
+                index, command, input,
+            )?)]))
         }
         _ => unreachable!("structured command checked by caller"),
     }
@@ -150,7 +174,7 @@ fn single_non_negative_integer(
 fn require_no_input(
     index: usize,
     command: &ParsedCommand,
-    input: &Option<Vec<Value>>,
+    input: &Option<PipelineData>,
 ) -> Result<(), ExecutionError> {
     if input.is_some() {
         return Err(stage_error(
@@ -165,9 +189,104 @@ fn require_no_input(
 fn require_input(
     index: usize,
     command: &ParsedCommand,
-    input: Option<Vec<Value>>,
+    input: Option<PipelineData>,
 ) -> Result<Vec<Value>, ExecutionError> {
-    input.ok_or_else(|| stage_error(index, command, "consumer requires structured input"))
+    match input {
+        Some(PipelineData::Structured(values)) => Ok(values),
+        Some(PipelineData::Text(bytes)) => text_to_values(index, command, bytes),
+        None => Err(stage_error(
+            index,
+            command,
+            "consumer requires structured input",
+        )),
+    }
+}
+
+struct ExternalOutput {
+    stdout: Vec<u8>,
+    exit_code: i32,
+}
+
+fn execute_external_stage(
+    shell: &Shell,
+    index: usize,
+    command: &ParsedCommand,
+    input: Option<PipelineData>,
+) -> Result<ExternalOutput, ExecutionError> {
+    if shell.builtins.get(&command.name).is_some() {
+        return Err(stage_error(
+            index,
+            command,
+            "stateful builtins cannot consume structured pipelines",
+        ));
+    }
+
+    let mut process = Command::new(&command.name);
+    process
+        .args(resolved_args(shell, command)?)
+        .envs(shell.environment_overrides())
+        .stdout(Stdio::piped());
+
+    let input = input.map(pipeline_data_to_text);
+    if input.is_some() {
+        process.stdin(Stdio::piped());
+    }
+
+    let mut child = process
+        .spawn()
+        .map_err(|error| stage_error(index, command, error.to_string()))?;
+    let writer = input.and_then(|input| {
+        child
+            .stdin
+            .take()
+            .map(|mut stdin| std::thread::spawn(move || stdin.write_all(&input)))
+    });
+    let output = child
+        .wait_with_output()
+        .map_err(|error| stage_error(index, command, error.to_string()))?;
+
+    if let Some(writer) = writer {
+        writer
+            .join()
+            .map_err(|_| stage_error(index, command, "stdin adapter thread panicked"))?
+            .map_err(|error| stage_error(index, command, error.to_string()))?;
+    }
+
+    Ok(ExternalOutput {
+        stdout: output.stdout,
+        exit_code: status_exit_code(output.status),
+    })
+}
+
+fn pipeline_data_to_text(data: PipelineData) -> Vec<u8> {
+    match data {
+        PipelineData::Text(bytes) => bytes,
+        PipelineData::Structured(values) => {
+            let mut output = values
+                .into_iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+                .into_bytes();
+            if !output.is_empty() {
+                output.push(b'\n');
+            }
+            output
+        }
+    }
+}
+
+fn text_to_values(
+    index: usize,
+    command: &ParsedCommand,
+    bytes: Vec<u8>,
+) -> Result<Vec<Value>, ExecutionError> {
+    let text = String::from_utf8(bytes)
+        .map_err(|_| stage_error(index, command, "external output is not valid UTF-8"))?;
+    Ok(text
+        .lines()
+        .map(|line| Value::String(line.to_string()))
+        .collect())
 }
 
 fn require_no_args(index: usize, command: &ParsedCommand) -> Result<(), ExecutionError> {
@@ -208,7 +327,7 @@ mod tests {
         };
 
         assert_eq!(
-            execute_native_pipeline(&shell, &pipeline).unwrap(),
+            structured_values(execute_structured_pipeline(&shell, &pipeline).unwrap()),
             vec![Value::List(vec![Value::Int(1), Value::Int(2)])]
         );
     }
@@ -223,7 +342,7 @@ mod tests {
         };
 
         assert_eq!(
-            execute_native_pipeline(&shell, &pipeline).unwrap(),
+            structured_values(execute_structured_pipeline(&shell, &pipeline).unwrap()),
             vec![Value::Int(1)]
         );
     }
@@ -235,8 +354,45 @@ mod tests {
             panic!("expected pipeline");
         };
 
-        let error = execute_native_pipeline(&shell, &pipeline).unwrap_err();
+        let error = execute_structured_pipeline(&shell, &pipeline).unwrap_err();
         assert_eq!(error.command, "take");
         assert!(error.message.contains("consumer requires structured input"));
+    }
+
+    #[test]
+    fn adapts_structured_values_through_external_commands() {
+        let shell = Shell::new();
+        let parser::ParsedInput::Pipeline(pipeline) =
+            parser::parse("values [\"crab\", \"shell\"] | grep crab | collect").unwrap()
+        else {
+            panic!("expected pipeline");
+        };
+
+        assert_eq!(
+            structured_values(execute_structured_pipeline(&shell, &pipeline).unwrap()),
+            vec![Value::List(vec![Value::String("crab".into())])]
+        );
+    }
+
+    #[test]
+    fn adapts_external_text_lines_for_structured_consumers() {
+        let shell = Shell::new();
+        let parser::ParsedInput::Pipeline(pipeline) =
+            parser::parse("printf \"first\nsecond\n\" | count").unwrap()
+        else {
+            panic!("expected pipeline");
+        };
+
+        assert_eq!(
+            structured_values(execute_structured_pipeline(&shell, &pipeline).unwrap()),
+            vec![Value::Int(2)]
+        );
+    }
+
+    fn structured_values(output: StructuredPipelineOutput) -> Vec<Value> {
+        let PipelineData::Structured(values) = output.data else {
+            panic!("expected structured output");
+        };
+        values
     }
 }
