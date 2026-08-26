@@ -1,8 +1,8 @@
 use crate::lexer::Token;
 use crate::runtime::Value;
 
-use super::ast::{BinaryOperator, Expression, MatchExpressionArm, MatchPattern};
 use super::error::ParseError;
+use super::language::{BinaryOperator, Expression, MatchExpressionArm, MatchPattern};
 
 pub(super) fn parse_expression(tokens: &[Token]) -> Result<Expression, ParseError> {
     if tokens.is_empty() {

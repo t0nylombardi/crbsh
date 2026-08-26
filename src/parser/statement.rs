@@ -4,9 +4,16 @@ use crate::runtime::{TypeName, Value};
 #[cfg(test)]
 use crate::lexer::TokenizeError;
 
-use super::ast::*;
+use super::ast::ParsedInput;
+use super::command::{OutputRedirection, ParsedCommand, Pipeline, PipelineConnector, Redirections};
 use super::error::ParseError;
 use super::expression::{parse_expression, token_to_expression, word_to_expression};
+use super::language::{
+    Expression, FunctionDefinition, FunctionParam, IfBranch, Iterable, MatchArm, MatchPattern,
+};
+
+#[cfg(test)]
+use super::language::BinaryOperator;
 
 impl From<&str> for Expression {
     fn from(value: &str) -> Self {
