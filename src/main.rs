@@ -1084,6 +1084,63 @@ fn identity(value: int) -> int {
     }
 
     #[test]
+    fn typed_function_rejects_the_wrong_return_type() {
+        let mut shell = Shell::new();
+
+        run(
+            &mut shell,
+            r#"
+fn wrong_type() -> int {
+    return "crab"
+}
+"#,
+        );
+
+        assert_eq!(
+            execute_function_call(&mut shell, "wrong_type", &[]),
+            Err("type mismatch: expected int, found string".into())
+        );
+    }
+
+    #[test]
+    fn typed_function_rejects_return_without_a_value() {
+        let mut shell = Shell::new();
+
+        run(
+            &mut shell,
+            r#"
+fn no_value() -> int {
+    return
+}
+"#,
+        );
+
+        assert_eq!(
+            execute_function_call(&mut shell, "no_value", &[]),
+            Err("function 'no_value' expected return int".into())
+        );
+    }
+
+    #[test]
+    fn typed_function_rejects_falling_through_without_a_return() {
+        let mut shell = Shell::new();
+
+        run(
+            &mut shell,
+            r#"
+fn falls_through() -> int {
+    let value = 1
+}
+"#,
+        );
+
+        assert_eq!(
+            execute_function_call(&mut shell, "falls_through", &[]),
+            Err("function 'falls_through' expected return int".into())
+        );
+    }
+
+    #[test]
     fn function_invocation_uses_fresh_scope() {
         let mut shell = Shell::new();
 
