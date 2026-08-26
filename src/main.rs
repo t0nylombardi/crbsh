@@ -645,6 +645,9 @@ fn raw_builtin_arg(argument: &Expression) -> Result<String, ShellError> {
             raw_builtin_arg(right)?
         ),
         Expression::Call { name, .. } => name.clone(),
+        Expression::List(_) | Expression::Index { .. } | Expression::Len(_) => {
+            return Err(ShellError::UnsupportedCall("complex raw argument".into()));
+        }
     })
 }
 
@@ -828,6 +831,14 @@ fn iterable_values(shell: &mut Shell, iterable: Iterable) -> Result<Vec<Value>, 
             .into_iter()
             .map(Value::String)
             .collect()),
+        Iterable::Expression(expression) => match evaluate_expression(shell, &expression)? {
+            Value::List(values) => Ok(values),
+            value => Err(ShellError::TypeMismatch {
+                expected: TypeName::List(None),
+                found: value.type_name(),
+            }
+            .into()),
+        },
     }
 }
 
@@ -926,6 +937,21 @@ fn evaluate_expression(
                 value.ok_or_else(|| format!("function '{name}' did not return a value"))
             })
             .map_err(EvalError::Function),
+        parser::Expression::List(expressions) => expressions
+            .iter()
+            .map(|expression| evaluate_expression(shell, expression))
+            .collect::<Result<Vec<_>, _>>()
+            .and_then(|values| shell::validate_list_values(values).map_err(Into::into))
+            .map(Value::List),
+        parser::Expression::Index { target, index } => {
+            let target = evaluate_expression(shell, target)?;
+            let index = evaluate_expression(shell, index)?;
+            shell::evaluate_index(target, index).map_err(Into::into)
+        }
+        parser::Expression::Len(target) => {
+            let target = evaluate_expression(shell, target)?;
+            shell::evaluate_len(target).map_err(Into::into)
+        }
     }
 }
 
@@ -969,8 +995,8 @@ fn execute_function_call_inner(
 
     let mut setup_error = None;
     for (param, value) in function.params.iter().zip(values) {
-        if let Some(expected) = param.type_annotation
-            && value.type_name() != expected
+        if let Some(expected) = &param.type_annotation
+            && !expected.accepts(&value.type_name())
         {
             setup_error = Some(format!(
                 "type mismatch: expected {expected}, found {}",
@@ -979,7 +1005,8 @@ fn execute_function_call_inner(
             break;
         }
 
-        if let Err(err) = shell.declare_variable(&param.name, param.type_annotation, value) {
+        if let Err(err) = shell.declare_variable(&param.name, param.type_annotation.clone(), value)
+        {
             setup_error = Some(err.to_string());
             break;
         }
@@ -1018,7 +1045,7 @@ fn enforce_return_type(
     value: Option<Value>,
 ) -> Result<Option<Value>, String> {
     match (return_type, value) {
-        (Some(expected), Some(value)) if value.type_name() == expected => Ok(Some(value)),
+        (Some(expected), Some(value)) if expected.accepts(&value.type_name()) => Ok(Some(value)),
         (Some(expected), Some(value)) => Err(format!(
             "type mismatch: expected {expected}, found {}",
             value.type_name()
@@ -1033,6 +1060,74 @@ mod tests {
     use crate::parser::Expression;
 
     use super::*;
+
+    #[test]
+    fn lists_work_across_declarations_functions_loops_indexing_and_len() {
+        let mut shell = Shell::new();
+
+        run(&mut shell, r#"let names = ["Tony", "Alice", "Bob"]"#);
+        run(&mut shell, "let first = names[0]");
+        run(&mut shell, "let count = names.len");
+        run(
+            &mut shell,
+            r#"
+fn last(items: list<string>) -> string {
+    let result = ""
+    for item in items {
+        result = item
+    }
+    return result
+}
+"#,
+        );
+        run(&mut shell, r#"let final = last(["one", "two", "three"])"#);
+
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("first".into())),
+            Ok(Value::String("Tony".into()))
+        );
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("count".into())),
+            Ok(Value::Int(3))
+        );
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("final".into())),
+            Ok(Value::String("three".into()))
+        );
+    }
+
+    #[test]
+    fn list_arguments_execute_in_procedures_and_for_loops() {
+        let mut shell = Shell::new();
+
+        run(
+            &mut shell,
+            r#"
+fn consume(items: list<string>) {
+    for item in items {
+        let copy = item
+    }
+}
+"#,
+        );
+        run(&mut shell, r#"consume(["one", "two", "three"])"#);
+
+        assert_eq!(shell.exit_code, 0);
+    }
+
+    #[test]
+    fn typed_lists_accept_empty_values_and_reject_wrong_element_types() {
+        let mut shell = Shell::new();
+
+        run(&mut shell, "let empty: list<int> = []");
+        assert_eq!(shell.exit_code, 0);
+        let wrong = parser::parse(r#"let wrong: list<int> = ["nope"]"#).unwrap();
+        assert!(matches!(
+            execute_input(&mut shell, wrong),
+            ControlFlow::Continue
+        ));
+        assert_eq!(shell.exit_code, 2);
+    }
 
     #[test]
     fn function_call_expression_returns_value() {

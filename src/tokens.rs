@@ -19,6 +19,8 @@ pub enum Token {
     Slash,
     LeftParen,
     RightParen,
+    LeftBracket,
+    RightBracket,
     LessEqual,
     GreaterEqual,
     LeftBrace,
@@ -183,6 +185,16 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, TokenizeError> {
                 tokens.push(Token::RightParen);
             }
 
+            '[' if !in_single_quotes && !in_double_quotes => {
+                push_word(&mut tokens, &mut current, &mut quoted);
+                tokens.push(Token::LeftBracket);
+            }
+
+            ']' if !in_single_quotes && !in_double_quotes => {
+                push_word(&mut tokens, &mut current, &mut quoted);
+                tokens.push(Token::RightBracket);
+            }
+
             '+' if !in_single_quotes
                 && !in_double_quotes
                 && current.is_empty()
@@ -294,6 +306,23 @@ mod tests {
         assert_eq!(
             tokens,
             vec![Token::Word("print".into()), Token::Word("hello".into())]
+        );
+    }
+
+    #[test]
+    fn tokenizes_list_literal_and_index() {
+        assert_eq!(
+            tokenize(r#"["Tony", "Alice"][0]"#).unwrap(),
+            vec![
+                Token::LeftBracket,
+                Token::StringLiteral("Tony".into()),
+                Token::Comma,
+                Token::StringLiteral("Alice".into()),
+                Token::RightBracket,
+                Token::LeftBracket,
+                Token::IntLiteral(0),
+                Token::RightBracket,
+            ]
         );
     }
 

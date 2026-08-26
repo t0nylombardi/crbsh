@@ -20,6 +20,12 @@ pub enum Expression {
         name: String,
         args: Vec<Expression>,
     },
+    List(Vec<Expression>),
+    Index {
+        target: Box<Expression>,
+        index: Box<Expression>,
+    },
+    Len(Box<Expression>),
     Binary {
         left: Box<Expression>,
         operator: BinaryOperator,
@@ -176,6 +182,7 @@ pub enum Iterable {
         inclusive: bool,
     },
     Glob(String),
+    Expression(Expression),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -730,7 +737,9 @@ fn parse_iterable(input: &str) -> Result<Iterable, ParseError> {
         return Ok(Iterable::Glob(input.into()));
     }
 
-    Err(ParseError::InvalidIterable(input.into()))
+    parse_expression_from_source(input)
+        .map(Iterable::Expression)
+        .map_err(|_| ParseError::InvalidIterable(input.into()))
 }
 
 fn parse_block_body(
@@ -873,6 +882,20 @@ fn parse_let(tokens: &[Token]) -> Result<ParsedInput, ParseError> {
     }
 
     let (type_annotation, rest) = match &tokens[1..] {
+        [
+            Token::Colon,
+            Token::Word(list),
+            Token::RedirectIn,
+            Token::Word(element),
+            Token::RedirectOut,
+            rest @ ..,
+        ] if list == "list" => {
+            let source = format!("list<{element}>");
+            let Some(type_name) = TypeName::parse(&source) else {
+                return Err(ParseError::InvalidTypeName(source));
+            };
+            (Some(type_name), rest)
+        }
         [Token::Colon, Token::Word(type_name), rest @ ..] => {
             let Some(type_name) = TypeName::parse(type_name) else {
                 return Err(ParseError::InvalidTypeName(type_name.clone()));
@@ -946,6 +969,36 @@ fn parse_expression(tokens: &[Token]) -> Result<Expression, ParseError> {
 }
 
 fn parse_pipeline(tokens: Vec<Token>) -> Result<Pipeline, ParseError> {
+    if !tokens.iter().any(|token| {
+        matches!(
+            token,
+            Token::Pipe | Token::RedirectIn | Token::RedirectOut | Token::RedirectAppend
+        )
+    }) {
+        if let Ok(Expression::Call { name, args }) = parse_expression(&tokens) {
+            return Ok(Pipeline {
+                commands: vec![ParsedCommand {
+                    name,
+                    args,
+                    redirections: Redirections::default(),
+                }],
+            });
+        }
+
+        if let [Token::Word(name), arguments @ ..] = tokens.as_slice()
+            && !arguments.is_empty()
+            && let Ok(argument) = parse_expression(arguments)
+        {
+            return Ok(Pipeline {
+                commands: vec![ParsedCommand {
+                    name: name.clone(),
+                    args: vec![argument],
+                    redirections: Redirections::default(),
+                }],
+            });
+        }
+    }
+
     let mut commands = Vec::new();
     let mut current: Option<ParsedCommand> = None;
     let mut pending_redirection = None;
@@ -1131,14 +1184,75 @@ impl<'a> ExpressionParser<'a> {
             return Err(ParseError::MissingAssignmentValue);
         };
 
+        if matches!(token, Token::LeftBracket) {
+            return self.parse_list();
+        }
+
         if let Token::Word(name) = token
             && matches!(self.peek(), Some(Token::LeftParen))
         {
             self.position += 1;
-            return self.parse_call(name.clone());
+            let expression = self.parse_call(name.clone())?;
+            return self.parse_postfix(expression);
         }
 
-        token_to_expression(token).ok_or_else(|| ParseError::UnexpectedToken(token.clone()))
+        let expression =
+            token_to_expression(token).ok_or_else(|| ParseError::UnexpectedToken(token.clone()))?;
+        self.parse_postfix(expression)
+    }
+
+    fn parse_list(&mut self) -> Result<Expression, ParseError> {
+        let mut values = Vec::new();
+
+        if matches!(self.peek(), Some(Token::RightBracket)) {
+            self.position += 1;
+            return Ok(Expression::List(values));
+        }
+
+        loop {
+            values.push(self.parse_equality()?);
+            match self.peek() {
+                Some(Token::Comma) => self.position += 1,
+                Some(Token::RightBracket) => {
+                    self.position += 1;
+                    break;
+                }
+                Some(token) => return Err(ParseError::UnexpectedToken(token.clone())),
+                None => return Err(ParseError::UnexpectedToken(Token::LeftBracket)),
+            }
+        }
+
+        self.parse_postfix(Expression::List(values))
+    }
+
+    fn parse_postfix(&mut self, mut expression: Expression) -> Result<Expression, ParseError> {
+        loop {
+            if matches!(self.peek(), Some(Token::LeftBracket)) {
+                self.position += 1;
+                let index = self.parse_equality()?;
+                match self.advance() {
+                    Some(Token::RightBracket) => {
+                        expression = Expression::Index {
+                            target: Box::new(expression),
+                            index: Box::new(index),
+                        };
+                    }
+                    Some(token) => return Err(ParseError::UnexpectedToken(token.clone())),
+                    None => return Err(ParseError::UnexpectedToken(Token::LeftBracket)),
+                }
+                continue;
+            }
+
+            if let Expression::Identifier(name) = &expression
+                && let Some(target) = name.strip_suffix(".len")
+                && !target.is_empty()
+            {
+                expression = Expression::Len(Box::new(word_to_expression(target.into())));
+            }
+            break;
+        }
+
+        Ok(expression)
     }
 
     fn parse_call(&mut self, name: String) -> Result<Expression, ParseError> {
@@ -1362,6 +1476,8 @@ fn token_description(token: &Token) -> String {
         Token::Slash => "'/'".into(),
         Token::LeftParen => "'('".into(),
         Token::RightParen => "')'".into(),
+        Token::LeftBracket => "'['".into(),
+        Token::RightBracket => "']'".into(),
         Token::LessEqual => "'<='".into(),
         Token::GreaterEqual => "'>='".into(),
         Token::LeftBrace => "'{'".into(),
@@ -1391,6 +1507,69 @@ fn parses_simple_command() {
             }],
         })
     );
+}
+
+#[test]
+fn parses_typed_list_literal() {
+    assert_eq!(
+        parse("let numbers: list<int> = [1, 2, 3, 4]").unwrap(),
+        ParsedInput::Let {
+            name: "numbers".into(),
+            type_annotation: Some(TypeName::List(Some(Box::new(TypeName::Int)))),
+            value: Expression::List(vec![
+                Value::Int(1).into(),
+                Value::Int(2).into(),
+                Value::Int(3).into(),
+                Value::Int(4).into(),
+            ]),
+        }
+    );
+}
+
+#[test]
+fn parses_list_index_and_len_arguments() {
+    let ParsedInput::Pipeline(index_pipeline) = parse("print names[0]").unwrap() else {
+        panic!("expected pipeline");
+    };
+    assert!(matches!(
+        index_pipeline.commands[0].args.as_slice(),
+        [Expression::Index { .. }]
+    ));
+
+    let ParsedInput::Pipeline(len_pipeline) = parse("print names.len").unwrap() else {
+        panic!("expected pipeline");
+    };
+    assert!(matches!(
+        len_pipeline.commands[0].args.as_slice(),
+        [Expression::Len(_)]
+    ));
+}
+
+#[test]
+fn parses_list_as_function_call_argument_and_for_iterable() {
+    let ParsedInput::Pipeline(pipeline) = parse(r#"print_all(["one", "two", "three"])"#).unwrap()
+    else {
+        panic!("expected pipeline");
+    };
+    assert!(matches!(
+        pipeline.commands[0].args.as_slice(),
+        [Expression::List(values)] if values.len() == 3
+    ));
+
+    let ParsedInput::For { iterable, .. } = parse("for item in items {\nprint item\n}").unwrap()
+    else {
+        panic!("expected for loop");
+    };
+    assert_eq!(
+        iterable,
+        Iterable::Expression(Expression::Identifier("items".into()))
+    );
+}
+
+#[test]
+fn rejects_unclosed_list_literal_and_index() {
+    assert!(parse("let names = [\"Tony\"").is_err());
+    assert!(parse("print names[0").is_err());
 }
 
 #[test]
