@@ -1,4 +1,4 @@
-use crate::jobs::JobState;
+use crate::execution::JobState;
 use crate::shell::Shell;
 
 use super::{BuiltinOutcome, BuiltinResult};

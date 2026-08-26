@@ -1,4 +1,4 @@
-use crate::jobs::{JobError, JobId};
+use crate::execution::{JobError, JobId};
 use crate::shell::Shell;
 
 use super::{BuiltinError, BuiltinOutcome, BuiltinResult};

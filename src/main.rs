@@ -1,7 +1,6 @@
 mod builtins;
-mod executor;
+mod execution;
 mod history;
-mod jobs;
 mod lexer;
 mod parser;
 mod prompt;
@@ -473,7 +472,7 @@ fn execute_input(shell: &mut Shell, parsed_input: ParsedInput) -> ControlFlow {
                 return ControlFlow::Continue;
             }
 
-            match executor::execute_background_pipeline(shell, &pipeline, command) {
+            match execution::execute_background_pipeline(shell, &pipeline, command) {
                 Ok((id, pid)) => {
                     println!("[{id}] {pid}");
                     shell.exit_code = 0;
@@ -571,7 +570,7 @@ fn execute_pipeline_input(shell: &mut Shell, pipeline: Pipeline) -> ControlFlow 
         return ControlFlow::Continue;
     }
 
-    match executor::execute_pipeline(shell, &pipeline) {
+    match execution::execute_pipeline(shell, &pipeline) {
         Ok(code) => {
             shell.exit_code = code;
         }

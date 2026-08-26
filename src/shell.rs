@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::builtins::registry::BuiltinRegistry;
+use crate::execution::JobManager;
 use crate::history::History;
-use crate::jobs::JobManager;
 use crate::parser::{BinaryOperator, Expression, FunctionDefinition, ParsedCommand};
 use crate::runtime::{TypeName, Value};
 

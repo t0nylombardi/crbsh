@@ -3,8 +3,11 @@ use std::io::Write;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Stdio};
 
+mod jobs;
+
+pub use jobs::{JobError, JobId, JobManager, JobState};
+
 use crate::builtins;
-use crate::jobs::JobId;
 use crate::parser::{ParsedCommand, Pipeline};
 use crate::shell::{Shell, ShellError};
 
@@ -429,7 +432,7 @@ mod tests {
     use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use crate::jobs::JobState;
+    use super::JobState;
     use crate::parser::{OutputRedirection, ParsedCommand, Pipeline, Redirections};
     use crate::runtime::Value;
     use crate::shell::Shell;
