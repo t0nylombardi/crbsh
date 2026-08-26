@@ -3,7 +3,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 use crate::parser::{Expression, ParsedCommand, Pipeline};
-use crate::runtime::Value;
+use crate::runtime::{Value, ValueStream};
 use crate::shell::Shell;
 
 use super::ExecutionError;
@@ -22,7 +22,7 @@ pub(super) fn contains_structured_command(pipeline: &Pipeline) -> bool {
 #[derive(Debug)]
 pub(super) enum PipelineData {
     Text(Vec<u8>),
-    Structured(Vec<Value>),
+    Structured(ValueStream),
 }
 
 #[derive(Debug)]
@@ -65,7 +65,7 @@ pub(super) fn execute_structured_pipeline(
     }
 
     Ok(StructuredPipelineOutput {
-        data: stream.unwrap_or_else(|| PipelineData::Structured(Vec::new())),
+        data: stream.unwrap_or_else(|| PipelineData::Structured(ValueStream::empty())),
         exit_code,
     })
 }
@@ -80,15 +80,7 @@ fn execute_stage(
         "values" => {
             require_no_input(index, command, &input)?;
             let values = evaluate_args(shell, index, command)?;
-            Ok(PipelineData::Structured(
-                values
-                    .into_iter()
-                    .flat_map(|value| match value {
-                        Value::List(values) => values,
-                        value => vec![value],
-                    })
-                    .collect(),
-            ))
+            Ok(PipelineData::Structured(ValueStream::from_values(values)))
         }
         "record" => {
             require_no_input(index, command, &input)?;
@@ -110,26 +102,26 @@ fn execute_stage(
                     .map_err(|error| stage_error(index, command, error.to_string()))?;
                 fields.insert(key, value);
             }
-            Ok(PipelineData::Structured(vec![Value::Record(fields)]))
+            Ok(PipelineData::Structured(ValueStream::from_record(fields)))
         }
         "take" => {
-            let mut values = require_input(index, command, input)?;
+            let values = require_input(index, command, input)?;
             let count = single_non_negative_integer(shell, index, command)?;
-            values.truncate(count);
-            Ok(PipelineData::Structured(values))
+            Ok(PipelineData::Structured(values.take(count)))
         }
         "count" => {
             require_no_args(index, command)?;
             let values = require_input(index, command, input)?;
-            let count = i64::try_from(values.len())
+            let values = values
+                .count()
                 .map_err(|_| stage_error(index, command, "stream length exceeds int range"))?;
-            Ok(PipelineData::Structured(vec![Value::Int(count)]))
+            Ok(PipelineData::Structured(values))
         }
         "collect" => {
             require_no_args(index, command)?;
-            Ok(PipelineData::Structured(vec![Value::List(require_input(
-                index, command, input,
-            )?)]))
+            Ok(PipelineData::Structured(
+                require_input(index, command, input)?.collect(),
+            ))
         }
         _ => unreachable!("structured command checked by caller"),
     }
@@ -197,7 +189,7 @@ fn require_input(
     index: usize,
     command: &ParsedCommand,
     input: Option<PipelineData>,
-) -> Result<Vec<Value>, ExecutionError> {
+) -> Result<ValueStream, ExecutionError> {
     match input {
         Some(PipelineData::Structured(values)) => Ok(values),
         Some(PipelineData::Text(bytes)) => text_to_values(index, command, bytes),
@@ -270,6 +262,7 @@ fn pipeline_data_to_text(data: PipelineData) -> Vec<u8> {
         PipelineData::Text(bytes) => bytes,
         PipelineData::Structured(values) => {
             let mut output = values
+                .into_values()
                 .into_iter()
                 .map(|value| value.to_string())
                 .collect::<Vec<_>>()
@@ -287,13 +280,14 @@ fn text_to_values(
     index: usize,
     command: &ParsedCommand,
     bytes: Vec<u8>,
-) -> Result<Vec<Value>, ExecutionError> {
+) -> Result<ValueStream, ExecutionError> {
     let text = String::from_utf8(bytes)
         .map_err(|_| stage_error(index, command, "external output is not valid UTF-8"))?;
-    Ok(text
-        .lines()
-        .map(|line| Value::String(line.to_string()))
-        .collect())
+    Ok(ValueStream::from_text_lines(
+        text.lines()
+            .map(|line| Value::String(line.to_string()))
+            .collect(),
+    ))
 }
 
 fn require_no_args(index: usize, command: &ParsedCommand) -> Result<(), ExecutionError> {
@@ -400,6 +394,6 @@ mod tests {
         let PipelineData::Structured(values) = output.data else {
             panic!("expected structured output");
         };
-        values
+        values.into_values()
     }
 }

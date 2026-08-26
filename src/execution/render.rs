@@ -34,6 +34,7 @@ fn render(data: PipelineData) -> Vec<u8> {
         PipelineData::Text(bytes) => bytes,
         PipelineData::Structured(values) => {
             let mut bytes = values
+                .into_values()
                 .into_iter()
                 .map(|value| value.to_string())
                 .collect::<Vec<_>>()
@@ -51,7 +52,7 @@ fn render(data: PipelineData) -> Vec<u8> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use crate::runtime::Value;
+    use crate::runtime::{Value, ValueStream};
 
     use super::*;
 
@@ -61,11 +62,13 @@ mod tests {
         record.insert("name".into(), Value::String("Tony".into()));
 
         assert_eq!(
-            render(PipelineData::Structured(vec![
-                Value::Int(7),
-                Value::Record(record),
-                Value::List(vec![Value::Bool(true), Value::Bool(false)]),
-            ])),
+            render(PipelineData::Structured(ValueStream::from_text_lines(
+                vec![
+                    Value::Int(7),
+                    Value::Record(record),
+                    Value::List(vec![Value::Bool(true), Value::Bool(false)]),
+                ]
+            ))),
             b"7\n{name: Tony}\n[true, false]\n"
         );
     }
