@@ -6,8 +6,9 @@ use crate::builtins;
 use crate::parser::ParsedCommand;
 use crate::shell::Shell;
 
+use super::ExecutionError;
+use super::pipeline::status_exit_code;
 use super::redirect::output_file;
-use super::{ExecutionError, status_exit_code};
 
 pub(super) fn external_process(
     shell: &Shell,
