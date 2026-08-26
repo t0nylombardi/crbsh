@@ -1,46 +1,54 @@
 # crbsh
 
-`crbsh` is an experimental Unix shell written in Rust. It executes traditional
-Unix programs directly while providing a native language for typed values,
+`crbsh` is an experimental Unix shell with its own typed language, written in
+Rust. It runs traditional Unix programs directly while adding native values,
 functions, control flow, and structured pipelines.
 
-It is not a Bash clone and does not pass user input through Bash, Zsh, Fish, or
-`/bin/sh`. The lexer, parser, runtime, and process executor own the language from
-source text to child processes.
+The project is now a Cargo workspace with a deliberate language/runtime
+boundary:
 
-> `crbsh` is early-stage software. It is useful for development and language
-> experimentation, but it is not ready to replace a production login shell.
+- `crab-lang` is the reusable language library.
+- `crbsh` is the Unix shell host and executable.
+
+`crbsh` is not a Bash clone. User input is never delegated to Bash, Zsh, Fish,
+or `/bin/sh`; the project owns tokenization, parsing, evaluation, and process
+execution itself.
+
+> `crbsh` is early-stage software intended for development and language
+> experimentation. It is not ready to replace a production login shell.
 
 ## Highlights
 
 - Direct external command execution through `$PATH`.
-- Text pipelines, redirection, conditional chains, and background jobs.
+- Unix text pipelines, redirection, conditional chains, and background jobs.
 - Native `string`, `int`, `bool`, `list<T>`, and `record` values.
-- Variables, expressions, lexical scopes, functions, loops, and matching.
-- List literals, indexing, length inspection, and typed function boundaries.
-- Native structured pipelines with automatic Unix text adaptation.
-- No third-party Rust dependencies.
+- Typed variables, expressions, lexical scopes, functions, and recursion.
+- `if`/`else`, `while`, `for`, and `match` control flow.
+- Native structured pipelines with explicit Unix text adapters.
+- Separate `crab-lang` library with no third-party Rust dependencies.
 
 ## Requirements
 
 - Rust 1.88 or newer.
 - Cargo.
 - A Unix-like environment.
-- `make` only if you want to use the included Makefile targets.
+- `make` only for the included convenience targets.
 
 ## Build and Run
 
+Build the workspace and start the shell:
+
 ```sh
-cargo build
-cargo run
+cargo build --workspace
+cargo run -p crbsh
 ```
 
-After building, the binary is available at `target/debug/crbsh`.
+The debug binary is written to `target/debug/crbsh`.
 
 Run a `.crb` script:
 
 ```sh
-cargo run -- path/to/script.crb
+cargo run -p crbsh -- path/to/script.crb
 ```
 
 Other file extensions are rejected.
@@ -51,43 +59,65 @@ Run the complete project gate:
 make ci
 ```
 
-This runs formatting, compilation, tests, and Clippy with warnings denied. The
-equivalent commands are:
+Equivalent Cargo commands are:
 
 ```sh
 cargo fmt --check
-cargo check
-cargo test
-cargo clippy --all-targets --all-features -- -D warnings
+cargo check --workspace
+cargo test --workspace
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 ## Workspace Architecture
 
-The repository is a Cargo workspace with two packages:
-
-- `crab-lang` owns tokenization, parsing, language and command syntax,
-  native values, lexical scope state, function definitions, and native value
-  streams.
-- `crbsh` owns the executable shell host: Unix processes, byte-stream adapters,
-  redirection, jobs, builtins, environment integration, history, and the REPL.
-
-Structured pipelines cross that boundary explicitly. Native stages transform a
-`ValueStream`; the shell converts values to bytes before a Unix process and
-decodes process output when a later native stage needs values.
-
-## Install
-
-```sh
-make install
+```text
+source text
+    │
+    ▼
+┌──────────────────────── crab-lang ────────────────────────┐
+│ lexer → tokens → parser → AST                             │
+│ language values, types, scopes, functions, ValueStream    │
+└───────────────────────────┬────────────────────────────────┘
+                            │ parsed input and native values
+                            ▼
+┌────────────────────────── crbsh ───────────────────────────┐
+│ evaluator and persistent shell state                      │
+│ builtins, aliases, environment, history, startup config   │
+│ Unix processes, Stdio, redirection, jobs, REPL, rendering │
+└────────────────────────────────────────────────────────────┘
 ```
 
-The default destination is `/usr/local/bin/crbsh`. Set `PREFIX` to install
-elsewhere:
+### `crab-lang`
 
-```sh
-make install PREFIX="$HOME/.local"
-make uninstall PREFIX="$HOME/.local"
-```
+The `crates/crab-lang` package owns:
+
+- lexical analysis, quoting, escaping, literals, and operators;
+- parsing and AST construction;
+- language expressions and control-flow definitions;
+- command, redirection, and pipeline syntax;
+- `Value` and `TypeName`;
+- lexical scope and function-definition state;
+- ordered native `ValueStream` transformations.
+
+The Cargo package is named `crab-lang`; Rust code imports it as `crab_lang`.
+It remains in this repository so the language boundary can mature alongside its
+first real host without cross-repository release choreography.
+
+### `crbsh`
+
+The root package owns host behavior:
+
+- expression and statement orchestration involving shell capabilities;
+- direct Unix process execution and `$PATH` lookup;
+- byte-stream pipelines and `Stdio` wiring;
+- native-value-to-Unix-text adapters;
+- redirection, background jobs, and foreground control;
+- builtins, aliases, environment integration, and exit status;
+- history, startup configuration, prompt, scripts, and the REPL.
+
+The evaluator intentionally remains in `crbsh` while it coordinates host-only
+capabilities such as processes, builtins, globs, environment values, and status.
+That coupling is explicit instead of being smuggled into the language crate.
 
 ## Unix Commands and Text Pipelines
 
@@ -100,22 +130,22 @@ printf 'crab\nfish\n' | grep crab
 cat input.txt | grep crab > results.txt
 ```
 
-Pipeline chains use the previous pipeline's exit status:
+Pipeline chains use the preceding pipeline's exit status:
 
 ```crb
 cargo build && print "build passed"
 false || print "command failed"
 ```
 
-Supported process operators are:
+Supported process operators:
 
-- `|` — pipeline
-- `&&` — run the next pipeline after success
-- `||` — run the next pipeline after failure
-- `<` — input redirection
-- `>` — output redirection
-- `>>` — append redirection
-- trailing `&` — background external command or pipeline
+- `|` — connect pipeline stages.
+- `&&` — run the next pipeline after success.
+- `||` — run the next pipeline after failure.
+- `<` — redirect standard input.
+- `>` — redirect standard output.
+- `>>` — append standard output.
+- trailing `&` — run an external command or pipeline in the background.
 
 ## Native Values and Variables
 
@@ -130,11 +160,9 @@ retries = retries + 1
 print project retries ready
 ```
 
-Currently supported native types are `string`, `int`, `bool`, `list<T>`, and
-`record`. Typed lists include `list<string>`, `list<int>`, and `list<bool>`.
-
-Lists are homogeneous. Mixed element types are rejected. Empty lists are
-accepted, and an explicit annotation preserves their intended element type:
+Supported native types are `string`, `int`, `bool`, `list<T>`, and `record`.
+Lists are homogeneous; mixed element types are rejected. Explicit annotations
+preserve the intended type of an empty list:
 
 ```crb
 let names: list<string> = ["Tony", "Alice", "Bob"]
@@ -143,8 +171,8 @@ let count = names.len
 let empty: list<int> = []
 ```
 
-Indexing requires an integer and checks negative and out-of-bounds indexes.
-Index expressions compose normally:
+Indexes must be integers and are checked for negative and out-of-bounds values.
+Index expressions compose with other expressions:
 
 ```crb
 let answer = [20, 21, 22][1] * 2
@@ -155,18 +183,16 @@ Index assignment is not implemented.
 ## Structured Pipelines
 
 A pipeline becomes structured when it contains a native structured command.
-Native stages exchange ordered `Value` items without converting them to text.
+Inside native stages, data remains an ordered `ValueStream` instead of being
+converted to text.
 
-Available structured commands:
+Available native stages:
 
-- `values VALUE...` — produce native values. A top-level list expands into
-  individual stream items.
-- `record KEY VALUE...` — produce one atomic record from key/value pairs.
-- `take N` — keep the first `N` items.
-- `count` — consume the stream and produce its item count.
-- `collect` — consume the stream and produce one list containing all items.
-
-Examples:
+- `values VALUE...` — produce native values; a top-level list expands once.
+- `record KEY VALUE...` — produce one atomic record.
+- `take N` — keep the first `N` values.
+- `count` — replace the stream with its item count.
+- `collect` — bundle all stream items into one list.
 
 ```crb
 values [1, 2, 3] | take 2
@@ -180,15 +206,15 @@ values ["crab", "fish"] | collect
 # [crab, fish]
 ```
 
-Records are atomic stream items. Lists passed to `values` expand by one level;
-`collect` deliberately bundles stream items back into a list.
+Lists passed to `values` expand by one level. Records remain atomic stream
+items, and `collect` deliberately reconstructs a list.
 
-### Unix adapters
+### Unix boundaries
 
-External commands are text boundaries. When a structured stream enters an
-external Unix command, `crbsh` renders each value as one newline-delimited text
-item. If a later native consumer follows, external output is decoded as UTF-8
-and each line becomes a native string value:
+`crab-lang` owns native stream semantics. `crbsh` owns every Unix boundary.
+When values enter an external command, `crbsh` renders one newline-delimited
+item per value. When external output later enters a native stage, `crbsh`
+decodes UTF-8 text and converts each line into a native string:
 
 ```crb
 values ["crab", "fish"] | grep crab | collect
@@ -201,24 +227,16 @@ second
 ```
 
 Invalid UTF-8 cannot be adapted back into native values and produces a
-stage-specific structured pipeline error.
-
-### Rendering and validation
-
-Final structured output renders one value per line. Final-stage output and
-append redirection are supported:
+stage-specific error. Final structured output renders one value per line and
+supports final-stage output redirection:
 
 ```crb
 values [1, 2, 3] | take 2 > numbers.txt
 ```
 
-Structured pipeline errors name the failing command and its one-based stage.
-Producers must start a structured stream, consumers require input, arguments
-are validated, and output redirection is only valid on the final stage.
-
-Structured streams are currently ordered and buffered in memory. Lazy,
-backpressured value streaming and structured background pipelines are future
-work. Stateful builtins are intentionally rejected inside structured pipelines.
+Structured streams are currently buffered in memory. Stateful builtins and
+background execution are intentionally unsupported inside structured
+pipelines.
 
 ## Control Flow
 
@@ -239,7 +257,7 @@ if retries == 3 {
 }
 ```
 
-`for` supports native lists, integer ranges, and single-wildcard file globs:
+`for` supports native lists, integer ranges, and one-wildcard file globs:
 
 ```crb
 for name in ["Tony", "Alice", "Bob"] {
@@ -259,10 +277,10 @@ for file in src/*.rs {
 
 ### Match statements and expressions
 
-Match patterns support integer, string, and boolean literals plus the `_`
-wildcard. Arms are checked in source order, so the first matching arm wins.
+Patterns support integer, string, and boolean literals plus `_`. Arms are
+checked in source order.
 
-Statement matches may be non-exhaustive; no matching arm is a successful no-op:
+Statement matches may be non-exhaustive:
 
 ```crb
 match status {
@@ -272,8 +290,7 @@ match status {
 }
 ```
 
-Match expressions must include a wildcard arm because they must produce a
-value:
+Match expressions require a wildcard arm because they must produce a value:
 
 ```crb
 let label = match status {
@@ -283,7 +300,7 @@ let label = match status {
 }
 ```
 
-Matches can be nested, and `return` propagates through nested statement arms.
+Matches may be nested, and `return` propagates through nested statement arms.
 
 ## Functions
 
@@ -302,7 +319,7 @@ let total = add(2, 3)
 let name = first(["Tony", "Alice"])
 ```
 
-Procedures may use inferred parameters when they do not return a value:
+Procedures may infer parameter types when they do not return a value:
 
 ```crb
 fn show(value) {
@@ -341,95 +358,94 @@ fg 1
 
 Interactive history is stored at `$XDG_STATE_HOME/crbsh/history` when
 `XDG_STATE_HOME` is set, or `~/.local/state/crbsh/history` otherwise. Interactive
-startup configuration is loaded from `~/.crbshrc` when that file exists.
+startup configuration loads from `~/.crbshrc` when present.
 
 Registered builtins are `alias`, `cd`, `exit`, `export`, `fg`, `history`,
 `jobs`, `print`, `set`, `unalias`, and `unset`.
 
-## Architecture
-
-```text
-source text
-    ↓
-lexer → Vec<Token>
-    ↓
-parser → ParsedInput AST
-    ↓
-runtime evaluator
-    ├── values, scopes, functions, and control flow
-    └── execution
-        ├── direct Unix commands and text pipelines
-        ├── structured value pipelines and Unix adapters
-        ├── final rendering and redirection
-        └── background jobs
-```
-
-Responsibilities remain deliberately separate:
-
-- `lexer` recognizes words, literals, operators, quoting, and escaping.
-- `parser` owns grammar and AST construction without executing commands.
-- `runtime` evaluates native values, lexical scope, functions, and control flow.
-- `execution` owns processes, text and structured pipelines, adapters,
-  redirection, rendering, and jobs.
-- `shell.rs` owns persistent session state.
-- `main.rs` wires together the REPL, scripts, configuration, and runtime.
-
 ## Source Layout
 
 ```text
-src/
-├── main.rs
-├── shell.rs
-├── prompt.rs
-├── history.rs
-├── lexer/
-│   ├── mod.rs
-│   ├── token.rs
-│   └── error.rs
-├── parser/
-│   ├── mod.rs
-│   ├── ast.rs
-│   ├── expression.rs
-│   ├── statement.rs
-│   └── error.rs
-├── runtime/
-│   ├── mod.rs
-│   ├── value.rs
-│   ├── scope.rs
-│   ├── function.rs
-│   └── evaluator.rs
-├── execution/
-│   ├── mod.rs
-│   ├── command.rs
-│   ├── pipeline.rs
-│   ├── structured.rs
-│   ├── render.rs
-│   ├── redirect.rs
-│   ├── jobs.rs
-│   └── error.rs
-└── builtins/
-    ├── mod.rs
-    ├── registry.rs
-    ├── alias.rs
-    ├── cd.rs
-    ├── exit.rs
-    ├── export.rs
-    ├── fg.rs
+.
+├── Cargo.toml                     # workspace and crbsh package
+├── crates/
+│   └── crab-lang/
+│       ├── Cargo.toml
+│       └── src/
+│           ├── lib.rs
+│           ├── lexer/
+│           │   ├── mod.rs
+│           │   ├── token.rs
+│           │   └── error.rs
+│           ├── parser/
+│           │   ├── mod.rs
+│           │   ├── ast.rs
+│           │   ├── command.rs
+│           │   ├── language.rs
+│           │   ├── expression.rs
+│           │   ├── statement.rs
+│           │   └── error.rs
+│           └── runtime/
+│               ├── mod.rs
+│               ├── value.rs
+│               ├── stream.rs
+│               ├── scope.rs
+│               ├── state.rs
+│               └── function.rs
+└── src/
+    ├── main.rs
+    ├── shell.rs
+    ├── prompt.rs
     ├── history.rs
-    ├── jobs.rs
-    ├── print.rs
-    ├── set.rs
-    ├── unalias.rs
-    └── unset.rs
+    ├── parser/mod.rs              # crab_lang parser facade
+    ├── runtime/
+    │   ├── mod.rs                 # crab_lang runtime facade
+    │   └── evaluator.rs           # shell-host orchestration
+    ├── execution/
+    │   ├── command.rs
+    │   ├── pipeline.rs
+    │   ├── structured.rs          # native/Unix boundary
+    │   ├── render.rs
+    │   ├── redirect.rs
+    │   ├── jobs.rs
+    │   └── error.rs
+    └── builtins/
+        ├── registry.rs
+        ├── alias.rs
+        ├── cd.rs
+        ├── exit.rs
+        ├── export.rs
+        ├── fg.rs
+        ├── history.rs
+        ├── jobs.rs
+        ├── print.rs
+        ├── set.rs
+        ├── unalias.rs
+        └── unset.rs
+```
+
+## Install
+
+```sh
+make install
+```
+
+The default destination is `/usr/local/bin/crbsh`. Override `PREFIX` when
+needed:
+
+```sh
+make install PREFIX="$HOME/.local"
+make uninstall PREFIX="$HOME/.local"
 ```
 
 ## Current Limitations
 
 - `crbsh` is not POSIX-compatible or a drop-in replacement for existing shells.
 - Native syntax may change while the language is young.
+- The `crab-lang` public API is still evolving with its first host.
 - Index assignment is not implemented.
 - Structured streams are buffered rather than lazy or backpressured.
-- Structured pipelines do not run as background jobs.
+- Structured pipelines cannot run as background jobs.
 - Stateful builtins do not participate in pipelines.
-- Interactive continuation currently relies primarily on brace balance; a
-  richer complete/incomplete/invalid input model remains future work.
+- Interactive continuation primarily uses brace balance; a richer
+  complete/incomplete/invalid input model remains future work.
