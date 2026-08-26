@@ -5,7 +5,7 @@ use crate::builtins::registry::BuiltinRegistry;
 use crate::execution::JobManager;
 use crate::history::History;
 use crate::parser::{BinaryOperator, Expression, FunctionDefinition, ParsedCommand};
-use crate::runtime::{TypeName, Value};
+use crate::runtime::{ScopeError, ScopeStack, TypeName, Value};
 
 pub const MAX_FUNCTION_CALL_DEPTH: usize = 100;
 
@@ -50,16 +50,10 @@ pub struct Shell {
     pub history: History,
     pub jobs: JobManager,
     pub exit_code: i32,
-    scopes: Vec<HashMap<String, Variable>>,
+    scopes: ScopeStack,
     functions: HashMap<String, FunctionDefinition>,
     environment: HashMap<String, String>,
     function_call_depth: usize,
-}
-
-#[derive(Clone)]
-pub(crate) struct Variable {
-    value: Value,
-    type_annotation: Option<TypeName>,
 }
 
 impl Shell {
@@ -70,7 +64,7 @@ impl Shell {
             history: History::default(),
             jobs: JobManager::new(),
             exit_code: 0,
-            scopes: vec![HashMap::new()],
+            scopes: ScopeStack::new(),
             functions: HashMap::new(),
             environment: HashMap::new(),
             function_call_depth: 0,
@@ -122,25 +116,21 @@ impl Shell {
     /// Adds a lexical block scope. Variable lookup walks these frames from the
     /// innermost block toward the outermost visible scope.
     pub fn push_scope(&mut self) {
-        self.scopes.push(HashMap::new());
+        self.scopes.push();
     }
 
     pub fn pop_scope(&mut self) {
-        if self.scopes.len() > 1 {
-            self.scopes.pop();
-        }
+        self.scopes.pop();
     }
 
     /// Replaces the caller's local scopes with a fresh function scope while
     /// keeping the global scope visible. The returned scopes must be restored
     /// after the function finishes.
-    pub fn enter_function_scope(&mut self) -> Vec<HashMap<String, Variable>> {
-        let global_scope = self.scopes.first().cloned().unwrap_or_default();
-
-        std::mem::replace(&mut self.scopes, vec![global_scope, HashMap::new()])
+    pub(crate) fn enter_function_scope(&mut self) -> ScopeStack {
+        self.scopes.enter_function()
     }
 
-    pub fn restore_caller_scopes(&mut self, scopes: Vec<HashMap<String, Variable>>) {
+    pub(crate) fn restore_caller_scopes(&mut self, scopes: ScopeStack) {
         self.scopes = scopes;
     }
 
@@ -150,25 +140,9 @@ impl Shell {
         type_annotation: Option<TypeName>,
         value: Value,
     ) -> Result<(), ShellError> {
-        let name = name.into();
-
-        let scope = self.current_scope_mut();
-
-        if scope.contains_key(&name) {
-            return Err(ShellError::VariableAlreadyDefined(name));
-        }
-
-        enforce_type(type_annotation.clone(), &value)?;
-
-        scope.insert(
-            name,
-            Variable {
-                value,
-                type_annotation,
-            },
-        );
-
-        Ok(())
+        self.scopes
+            .declare(name.into(), type_annotation, value)
+            .map_err(ShellError::from)
     }
 
     pub fn assign_variable(
@@ -176,35 +150,14 @@ impl Shell {
         name: impl Into<String>,
         value: Value,
     ) -> Result<(), ShellError> {
-        let name = name.into();
-        let Some(existing) = self.find_variable_mut(&name) else {
-            return Err(ShellError::VariableNotDefined(name));
-        };
-
-        let expected = existing
-            .type_annotation
-            .clone()
-            .unwrap_or_else(|| existing.value.type_name());
-        let found = value.type_name();
-
-        if !expected.accepts(&found) {
-            return Err(ShellError::TypeMismatch { expected, found });
-        }
-
-        existing.value = value;
-
-        Ok(())
+        self.scopes
+            .assign(name.into(), value)
+            .map_err(ShellError::from)
     }
 
     #[cfg(test)]
     pub fn set_variable(&mut self, name: impl Into<String>, value: Value) {
-        self.current_scope_mut().insert(
-            name.into(),
-            Variable {
-                value,
-                type_annotation: None,
-            },
-        );
+        self.scopes.set(name.into(), value);
     }
 
     pub fn define_function(&mut self, name: impl Into<String>, definition: FunctionDefinition) {
@@ -244,25 +197,15 @@ impl Shell {
     }
 
     pub fn variables(&self) -> Vec<(String, Value)> {
-        let mut variables = HashMap::new();
-
-        for scope in &self.scopes {
-            for (name, variable) in scope {
-                variables.insert(name.clone(), variable.value.clone());
-            }
-        }
-
-        let mut variables = variables.into_iter().collect::<Vec<_>>();
-        variables.sort_by(|(left, _), (right, _)| left.cmp(right));
-        variables
+        self.scopes.visible_values()
     }
 
     pub fn variable_value(&self, name: &str) -> Option<Value> {
-        self.find_variable(name)
+        self.scopes.value(name)
     }
 
     pub fn export_variable(&mut self, name: &str) -> Result<(), ShellError> {
-        let Some(value) = self.find_variable(name) else {
+        let Some(value) = self.scopes.value(name) else {
             return Err(ShellError::VariableNotDefined(name.into()));
         };
 
@@ -272,18 +215,15 @@ impl Shell {
     }
 
     pub fn unset_variable(&mut self, name: &str) -> bool {
-        self.scopes
-            .iter_mut()
-            .rev()
-            .find_map(|scope| scope.remove(name))
-            .is_some()
+        self.scopes.remove(name)
     }
 
     pub fn evaluate(&self, expression: &Expression) -> Result<Value, ShellError> {
         match expression {
             Expression::Literal(value) => Ok(value.clone()),
             Expression::Identifier(name) => self
-                .find_variable(name)
+                .scopes
+                .value(name)
                 .ok_or_else(|| ShellError::UndefinedVariable(name.clone())),
             Expression::EnvironmentVariable(name) => self
                 .environment_value(name)
@@ -317,7 +257,8 @@ impl Shell {
     pub fn resolve_argument(&self, expression: &Expression) -> Result<String, ShellError> {
         match expression {
             Expression::Identifier(name) => Ok(self
-                .find_variable(name)
+                .scopes
+                .value(name)
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| name.clone())),
             _ => self.evaluate(expression).map(|value| value.to_string()),
@@ -345,25 +286,15 @@ impl Shell {
             .cloned()
             .or_else(|| std::env::var(name).ok())
     }
+}
 
-    fn current_scope_mut(&mut self) -> &mut HashMap<String, Variable> {
-        self.scopes
-            .last_mut()
-            .expect("shell always has at least one variable scope")
-    }
-
-    fn find_variable(&self, name: &str) -> Option<Value> {
-        self.scopes
-            .iter()
-            .rev()
-            .find_map(|scope| scope.get(name).map(|variable| variable.value.clone()))
-    }
-
-    fn find_variable_mut(&mut self, name: &str) -> Option<&mut Variable> {
-        self.scopes
-            .iter_mut()
-            .rev()
-            .find_map(|scope| scope.get_mut(name))
+impl From<ScopeError> for ShellError {
+    fn from(error: ScopeError) -> Self {
+        match error {
+            ScopeError::AlreadyDefined(name) => Self::VariableAlreadyDefined(name),
+            ScopeError::NotDefined(name) => Self::VariableNotDefined(name),
+            ScopeError::TypeMismatch { expected, found } => Self::TypeMismatch { expected, found },
+        }
     }
 }
 
@@ -575,20 +506,6 @@ pub fn evaluate_len(target: Value) -> Result<Value, ShellError> {
     };
     let len = i64::try_from(values.len()).map_err(|_| ShellError::IntegerOverflow)?;
     Ok(Value::Int(len))
-}
-
-fn enforce_type(type_annotation: Option<TypeName>, value: &Value) -> Result<(), ShellError> {
-    let Some(expected) = type_annotation else {
-        return Ok(());
-    };
-
-    let found = value.type_name();
-
-    if expected.accepts(&found) {
-        Ok(())
-    } else {
-        Err(ShellError::TypeMismatch { expected, found })
-    }
 }
 
 #[cfg(test)]
