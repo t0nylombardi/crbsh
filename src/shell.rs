@@ -7,6 +7,8 @@ use crate::jobs::JobManager;
 use crate::parser::{BinaryOperator, Expression, FunctionDefinition, ParsedCommand};
 use crate::value::{TypeName, Value};
 
+pub const MAX_FUNCTION_CALL_DEPTH: usize = 100;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AliasError {
     InvalidReplacement(String),
@@ -42,6 +44,7 @@ pub struct Shell {
     scopes: Vec<HashMap<String, Value>>,
     functions: HashMap<String, FunctionDefinition>,
     environment: HashMap<String, String>,
+    function_call_depth: usize,
 }
 
 impl Shell {
@@ -55,6 +58,7 @@ impl Shell {
             scopes: vec![HashMap::new()],
             functions: HashMap::new(),
             environment: HashMap::new(),
+            function_call_depth: 0,
         }
     }
 
@@ -179,6 +183,20 @@ impl Shell {
 
     pub fn function(&self, name: &str) -> Option<FunctionDefinition> {
         self.functions.get(name).cloned()
+    }
+
+    pub fn enter_function_call(&mut self) -> Result<(), usize> {
+        if self.function_call_depth >= MAX_FUNCTION_CALL_DEPTH {
+            return Err(MAX_FUNCTION_CALL_DEPTH);
+        }
+
+        self.function_call_depth += 1;
+        Ok(())
+    }
+
+    pub fn exit_function_call(&mut self) {
+        debug_assert!(self.function_call_depth > 0);
+        self.function_call_depth = self.function_call_depth.saturating_sub(1);
     }
 
     pub fn set_environment(&mut self, name: impl Into<String>, value: impl Into<String>) {

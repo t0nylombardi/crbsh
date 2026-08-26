@@ -44,6 +44,7 @@ enum ControlFlow {
     LoopContinue,
     Return(Option<Value>),
     Exit(i32),
+    Error(String),
 }
 
 fn main() {
@@ -209,6 +210,10 @@ fn handle_control_flow(shell: &mut Shell, flow: ControlFlow, interactive: bool) 
             eprintln!("crbsh: return outside function");
             shell.exit_code = 2;
         }
+        ControlFlow::Error(error) => {
+            eprintln!("crbsh: {error}");
+            shell.exit_code = 2;
+        }
         ControlFlow::Continue => {}
     }
 
@@ -346,9 +351,8 @@ fn execute_input(shell: &mut Shell, parsed_input: ParsedInput) -> ControlFlow {
                 Some(value) => match evaluate_expression(shell, &value) {
                     Ok(value) => Some(value),
                     Err(err) => {
-                        eprintln!("crbsh: {err}");
                         shell.exit_code = 2;
-                        return ControlFlow::Continue;
+                        return ControlFlow::Error(err.to_string());
                     }
                 },
                 None => None,
@@ -742,6 +746,7 @@ fn execute_while(
             }
             flow @ ControlFlow::Return(_) => return flow,
             flow @ ControlFlow::Exit(_) => return flow,
+            flow @ ControlFlow::Error(_) => return flow,
         }
     }
 }
@@ -777,6 +782,7 @@ fn execute_for(
             }
             flow @ ControlFlow::Return(_) => return flow,
             flow @ ControlFlow::Exit(_) => return flow,
+            flow @ ControlFlow::Error(_) => return flow,
         }
     }
 
@@ -928,6 +934,20 @@ fn execute_function_call(
     name: &str,
     args: &[parser::Expression],
 ) -> Result<Option<Value>, String> {
+    shell.enter_function_call().map_err(|limit| {
+        format!("function recursion limit of {limit} exceeded while calling '{name}'")
+    })?;
+
+    let result = execute_function_call_inner(shell, name, args);
+    shell.exit_function_call();
+    result
+}
+
+fn execute_function_call_inner(
+    shell: &mut Shell,
+    name: &str,
+    args: &[parser::Expression],
+) -> Result<Option<Value>, String> {
     let Some(function) = shell.function(name) else {
         return Err(format!("undefined function '{name}'"));
     };
@@ -984,6 +1004,7 @@ fn execute_function_call(
         }
         ControlFlow::Break => Err("break outside loop".into()),
         ControlFlow::LoopContinue => Err("continue outside loop".into()),
+        ControlFlow::Error(error) => Err(error),
         ControlFlow::Exit(code) => {
             shell.exit_code = code;
             Ok(None)
@@ -1030,6 +1051,60 @@ fn add(a: int, b: int) -> int {
         assert_eq!(
             shell.evaluate(&Expression::Identifier("total".into())),
             Ok(Value::Int(5))
+        );
+    }
+
+    #[test]
+    fn recursive_function_calls_return_values() {
+        let mut shell = Shell::new();
+
+        run(
+            &mut shell,
+            r#"
+fn factorial(n: int) -> int {
+    if n == 0 {
+        return 1
+    }
+
+    return n * factorial(n - 1)
+}
+"#,
+        );
+
+        assert_eq!(
+            execute_function_call(&mut shell, "factorial", &[Value::Int(5).into()]),
+            Ok(Some(Value::Int(120)))
+        );
+    }
+
+    #[test]
+    fn recursion_limit_returns_an_error_and_restores_call_state() {
+        let mut shell = Shell::new();
+
+        run(
+            &mut shell,
+            r#"
+fn recurse() -> int {
+    return recurse()
+}
+"#,
+        );
+        run(
+            &mut shell,
+            r#"
+fn identity(value: int) -> int {
+    return value
+}
+"#,
+        );
+
+        assert_eq!(
+            execute_function_call(&mut shell, "recurse", &[]),
+            Err("function recursion limit of 100 exceeded while calling 'recurse'".into())
+        );
+        assert_eq!(
+            execute_function_call(&mut shell, "identity", &[Value::Int(7).into()]),
+            Ok(Some(Value::Int(7)))
         );
     }
 
