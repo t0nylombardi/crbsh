@@ -545,6 +545,23 @@ mod tests {
             super::evaluate_index(Value::List(vec![Value::Int(1)]), Value::Int(1)),
             Err(ShellError::IndexOutOfBounds { index: 1, len: 1 })
         );
+        assert_eq!(
+            super::evaluate_index(
+                Value::List(vec![Value::Int(1)]),
+                Value::String("zero".into())
+            ),
+            Err(ShellError::TypeMismatch {
+                expected: TypeName::Int,
+                found: TypeName::String,
+            })
+        );
+        assert_eq!(
+            super::evaluate_index(Value::String("crab".into()), Value::Int(0)),
+            Err(ShellError::TypeMismatch {
+                expected: TypeName::List(None),
+                found: TypeName::String,
+            })
+        );
     }
 
     #[test]

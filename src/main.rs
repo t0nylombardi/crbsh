@@ -329,6 +329,26 @@ fn last(items: list<string>) -> string {
     }
 
     #[test]
+    fn indexing_composes_with_function_calls_and_larger_expressions() {
+        let mut shell = Shell::new();
+
+        run(
+            &mut shell,
+            r#"
+fn get_numbers() -> list<int> {
+    return [20, 21, 22]
+}
+"#,
+        );
+        run(&mut shell, "let answer = get_numbers()[1] * 2");
+
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("answer".into())),
+            Ok(Value::Int(42))
+        );
+    }
+
+    #[test]
     fn list_arguments_execute_in_procedures_and_for_loops() {
         let mut shell = Shell::new();
 
