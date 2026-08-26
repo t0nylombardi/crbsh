@@ -33,6 +33,15 @@ pub enum ShellError {
         expected: TypeName,
         found: TypeName,
     },
+    HeterogeneousList {
+        expected: TypeName,
+        found: TypeName,
+    },
+    IndexOutOfBounds {
+        index: i64,
+        len: usize,
+    },
+    NegativeIndex(i64),
 }
 
 pub struct Shell {
@@ -41,10 +50,16 @@ pub struct Shell {
     pub history: History,
     pub jobs: JobManager,
     pub exit_code: i32,
-    scopes: Vec<HashMap<String, Value>>,
+    scopes: Vec<HashMap<String, Variable>>,
     functions: HashMap<String, FunctionDefinition>,
     environment: HashMap<String, String>,
     function_call_depth: usize,
+}
+
+#[derive(Clone)]
+pub(crate) struct Variable {
+    value: Value,
+    type_annotation: Option<TypeName>,
 }
 
 impl Shell {
@@ -119,13 +134,13 @@ impl Shell {
     /// Replaces the caller's local scopes with a fresh function scope while
     /// keeping the global scope visible. The returned scopes must be restored
     /// after the function finishes.
-    pub fn enter_function_scope(&mut self) -> Vec<HashMap<String, Value>> {
+    pub fn enter_function_scope(&mut self) -> Vec<HashMap<String, Variable>> {
         let global_scope = self.scopes.first().cloned().unwrap_or_default();
 
         std::mem::replace(&mut self.scopes, vec![global_scope, HashMap::new()])
     }
 
-    pub fn restore_caller_scopes(&mut self, scopes: Vec<HashMap<String, Value>>) {
+    pub fn restore_caller_scopes(&mut self, scopes: Vec<HashMap<String, Variable>>) {
         self.scopes = scopes;
     }
 
@@ -143,9 +158,15 @@ impl Shell {
             return Err(ShellError::VariableAlreadyDefined(name));
         }
 
-        enforce_type(type_annotation, &value)?;
+        enforce_type(type_annotation.clone(), &value)?;
 
-        scope.insert(name, value);
+        scope.insert(
+            name,
+            Variable {
+                value,
+                type_annotation,
+            },
+        );
 
         Ok(())
     }
@@ -160,21 +181,30 @@ impl Shell {
             return Err(ShellError::VariableNotDefined(name));
         };
 
-        let expected = existing.type_name();
+        let expected = existing
+            .type_annotation
+            .clone()
+            .unwrap_or_else(|| existing.value.type_name());
         let found = value.type_name();
 
-        if expected != found {
+        if !expected.accepts(&found) {
             return Err(ShellError::TypeMismatch { expected, found });
         }
 
-        *existing = value;
+        existing.value = value;
 
         Ok(())
     }
 
     #[cfg(test)]
     pub fn set_variable(&mut self, name: impl Into<String>, value: Value) {
-        self.current_scope_mut().insert(name.into(), value);
+        self.current_scope_mut().insert(
+            name.into(),
+            Variable {
+                value,
+                type_annotation: None,
+            },
+        );
     }
 
     pub fn define_function(&mut self, name: impl Into<String>, definition: FunctionDefinition) {
@@ -217,8 +247,8 @@ impl Shell {
         let mut variables = HashMap::new();
 
         for scope in &self.scopes {
-            for (name, value) in scope {
-                variables.insert(name.clone(), value.clone());
+            for (name, variable) in scope {
+                variables.insert(name.clone(), variable.value.clone());
             }
         }
 
@@ -270,6 +300,16 @@ impl Shell {
 
                 evaluate_binary(*operator, left, right)
             }
+            Expression::List(values) => values
+                .iter()
+                .map(|value| self.evaluate(value))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(validate_list_values)
+                .map(Value::List),
+            Expression::Index { target, index } => {
+                evaluate_index(self.evaluate(target)?, self.evaluate(index)?)
+            }
+            Expression::Len(target) => evaluate_len(self.evaluate(target)?),
             Expression::Call { name, .. } => Err(ShellError::UnsupportedCall(name.clone())),
         }
     }
@@ -306,7 +346,7 @@ impl Shell {
             .or_else(|| std::env::var(name).ok())
     }
 
-    fn current_scope_mut(&mut self) -> &mut HashMap<String, Value> {
+    fn current_scope_mut(&mut self) -> &mut HashMap<String, Variable> {
         self.scopes
             .last_mut()
             .expect("shell always has at least one variable scope")
@@ -316,10 +356,10 @@ impl Shell {
         self.scopes
             .iter()
             .rev()
-            .find_map(|scope| scope.get(name).cloned())
+            .find_map(|scope| scope.get(name).map(|variable| variable.value.clone()))
     }
 
-    fn find_variable_mut(&mut self, name: &str) -> Option<&mut Value> {
+    fn find_variable_mut(&mut self, name: &str) -> Option<&mut Variable> {
         self.scopes
             .iter_mut()
             .rev()
@@ -373,6 +413,19 @@ impl fmt::Display for ShellError {
                     formatter,
                     "type mismatch: expected {expected}, found {found}"
                 )
+            }
+            Self::HeterogeneousList { expected, found } => write!(
+                formatter,
+                "list elements must have one type: expected {expected}, found {found}"
+            ),
+            Self::IndexOutOfBounds { index, len } => {
+                write!(
+                    formatter,
+                    "list index {index} out of bounds for length {len}"
+                )
+            }
+            Self::NegativeIndex(index) => {
+                write!(formatter, "list index cannot be negative: {index}")
             }
         }
     }
@@ -472,6 +525,58 @@ pub fn evaluate_binary(
     }
 }
 
+pub fn validate_list_values(values: Vec<Value>) -> Result<Vec<Value>, ShellError> {
+    let Some(expected) = values.first().map(Value::type_name) else {
+        return Ok(values);
+    };
+
+    if let Some(found) = values
+        .iter()
+        .skip(1)
+        .map(Value::type_name)
+        .find(|found| !expected.accepts(found))
+    {
+        return Err(ShellError::HeterogeneousList { expected, found });
+    }
+
+    Ok(values)
+}
+
+pub fn evaluate_index(target: Value, index: Value) -> Result<Value, ShellError> {
+    let Value::List(values) = target else {
+        return Err(ShellError::TypeMismatch {
+            expected: TypeName::List(None),
+            found: target.type_name(),
+        });
+    };
+    let Value::Int(index) = index else {
+        return Err(ShellError::TypeMismatch {
+            expected: TypeName::Int,
+            found: index.type_name(),
+        });
+    };
+    let index = usize::try_from(index).map_err(|_| ShellError::NegativeIndex(index))?;
+
+    values
+        .get(index)
+        .cloned()
+        .ok_or(ShellError::IndexOutOfBounds {
+            index: index as i64,
+            len: values.len(),
+        })
+}
+
+pub fn evaluate_len(target: Value) -> Result<Value, ShellError> {
+    let Value::List(values) = target else {
+        return Err(ShellError::TypeMismatch {
+            expected: TypeName::List(None),
+            found: target.type_name(),
+        });
+    };
+    let len = i64::try_from(values.len()).map_err(|_| ShellError::IntegerOverflow)?;
+    Ok(Value::Int(len))
+}
+
 fn enforce_type(type_annotation: Option<TypeName>, value: &Value) -> Result<(), ShellError> {
     let Some(expected) = type_annotation else {
         return Ok(());
@@ -479,7 +584,7 @@ fn enforce_type(type_annotation: Option<TypeName>, value: &Value) -> Result<(), 
 
     let found = value.type_name();
 
-    if expected == found {
+    if expected.accepts(&found) {
         Ok(())
     } else {
         Err(ShellError::TypeMismatch { expected, found })
@@ -492,6 +597,68 @@ mod tests {
     use crate::value::{TypeName, Value};
 
     use super::{Shell, ShellError};
+
+    #[test]
+    fn evaluates_list_index_and_len() {
+        let expression = Expression::List(vec![Value::Int(10).into(), Value::Int(20).into()]);
+        let mut shell = Shell::new();
+        shell
+            .declare_variable("numbers", None, shell.evaluate(&expression).unwrap())
+            .unwrap();
+
+        assert_eq!(
+            shell.evaluate(&Expression::Index {
+                target: Box::new(Expression::Identifier("numbers".into())),
+                index: Box::new(Value::Int(1).into()),
+            }),
+            Ok(Value::Int(20))
+        );
+        assert_eq!(
+            shell.evaluate(&Expression::Len(Box::new(Expression::Identifier(
+                "numbers".into()
+            )))),
+            Ok(Value::Int(2))
+        );
+    }
+
+    #[test]
+    fn rejects_heterogeneous_lists_and_invalid_indexes() {
+        assert_eq!(
+            super::validate_list_values(vec![Value::Int(1), Value::String("two".into())]),
+            Err(ShellError::HeterogeneousList {
+                expected: TypeName::Int,
+                found: TypeName::String,
+            })
+        );
+        assert_eq!(
+            super::evaluate_index(Value::List(vec![Value::Int(1)]), Value::Int(-1)),
+            Err(ShellError::NegativeIndex(-1))
+        );
+        assert_eq!(
+            super::evaluate_index(Value::List(vec![Value::Int(1)]), Value::Int(1)),
+            Err(ShellError::IndexOutOfBounds { index: 1, len: 1 })
+        );
+    }
+
+    #[test]
+    fn typed_empty_list_preserves_its_declared_element_type() {
+        let mut shell = Shell::new();
+        shell
+            .declare_variable(
+                "numbers",
+                Some(TypeName::List(Some(Box::new(TypeName::Int)))),
+                Value::List(Vec::new()),
+            )
+            .unwrap();
+
+        assert_eq!(
+            shell.assign_variable("numbers", Value::List(vec![Value::String("wrong".into())])),
+            Err(ShellError::TypeMismatch {
+                expected: TypeName::List(Some(Box::new(TypeName::Int))),
+                found: TypeName::List(Some(Box::new(TypeName::String))),
+            })
+        );
+    }
 
     #[test]
     fn resolves_native_variables() {
