@@ -1,14 +1,20 @@
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::Write;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Stdio};
 
+mod command;
 mod jobs;
+mod redirect;
+
+use command::{
+    execute_print, execute_single_external, external_process, print_output, resolved_args,
+};
+use redirect::output_file;
 
 pub use jobs::{JobError, JobId, JobManager, JobState};
 
-use crate::builtins;
-use crate::parser::{ParsedCommand, Pipeline};
+use crate::parser::Pipeline;
 use crate::shell::{Shell, ShellError};
 
 #[derive(Debug)]
@@ -333,87 +339,6 @@ fn status_exit_code(status: std::process::ExitStatus) -> i32 {
         .code()
         .or_else(|| status.signal().map(|signal| 128 + signal))
         .unwrap_or(1)
-}
-
-fn external_process(shell: &Shell, command: &ParsedCommand) -> Result<Command, ExecutionError> {
-    let mut process = Command::new(&command.name);
-    process
-        .args(resolved_args(shell, command)?)
-        .envs(shell.environment_overrides());
-
-    if let Some(path) = &command.redirections.stdin {
-        let input = File::open(path).map_err(|source| ExecutionError {
-            command: command.name.clone(),
-            message: source.to_string(),
-        })?;
-        process.stdin(Stdio::from(input));
-    }
-
-    if let Some(output) = command.redirections.stdout.as_ref() {
-        process.stdout(Stdio::from(output_file(
-            command,
-            &output.target,
-            output.append,
-        )?));
-    }
-
-    Ok(process)
-}
-
-fn execute_single_external(shell: &Shell, command: &ParsedCommand) -> Result<i32, ExecutionError> {
-    let mut process = external_process(shell, command)?;
-
-    let status = process.status().map_err(|source| ExecutionError {
-        command: command.name.clone(),
-        message: source.to_string(),
-    })?;
-
-    Ok(status_exit_code(status))
-}
-
-fn execute_print(shell: &Shell, command: &ParsedCommand) -> Result<i32, ExecutionError> {
-    let output = print_output(shell, command)?;
-
-    if let Some(redirection) = command.redirections.stdout.as_ref() {
-        let mut file = output_file(command, &redirection.target, redirection.append)?;
-
-        file.write_all(output.as_bytes())
-            .map_err(|source| ExecutionError {
-                command: command.name.clone(),
-                message: source.to_string(),
-            })?;
-    } else {
-        print!("{output}");
-    }
-
-    Ok(0)
-}
-
-fn print_output(shell: &Shell, command: &ParsedCommand) -> Result<String, ExecutionError> {
-    let args = resolved_args(shell, command)?;
-
-    Ok(builtins::print::output(&args))
-}
-
-fn resolved_args(shell: &Shell, command: &ParsedCommand) -> Result<Vec<String>, ExecutionError> {
-    command
-        .args
-        .iter()
-        .map(|arg| shell.resolve_argument(arg).map_err(ExecutionError::from))
-        .collect()
-}
-
-fn output_file(command: &ParsedCommand, path: &str, append: bool) -> Result<File, ExecutionError> {
-    OpenOptions::new()
-        .create(true)
-        .write(true)
-        .append(append)
-        .truncate(!append)
-        .open(path)
-        .map_err(|source| ExecutionError {
-            command: command.name.clone(),
-            message: source.to_string(),
-        })
 }
 
 impl From<ShellError> for ExecutionError {
