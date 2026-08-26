@@ -431,8 +431,8 @@ mod tests {
 
     use crate::jobs::JobState;
     use crate::parser::{OutputRedirection, ParsedCommand, Pipeline, Redirections};
+    use crate::runtime::Value;
     use crate::shell::Shell;
-    use crate::value::Value;
 
     use super::{execute_background_pipeline, execute_pipeline, status_exit_code};
 

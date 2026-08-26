@@ -5,8 +5,8 @@ mod jobs;
 mod lexer;
 mod parser;
 mod prompt;
+mod runtime;
 mod shell;
-mod value;
 
 use std::fs;
 use std::io::{self, BufRead, Write};
@@ -14,9 +14,8 @@ use std::path::{Path, PathBuf};
 
 use builtins::BuiltinOutcome;
 use parser::{Expression, Iterable, ParsedCommand, ParsedInput, Pipeline, PipelineConnector};
+use runtime::{TypeName, Value};
 use shell::{Shell, ShellError};
-use value::TypeName;
-use value::Value;
 
 enum EvalError {
     Shell(ShellError),
@@ -846,7 +845,7 @@ fn expect_int(value: Value) -> Result<i64, EvalError> {
     match value {
         Value::Int(value) => Ok(value),
         value => Err(shell::ShellError::TypeMismatch {
-            expected: value::TypeName::Int,
+            expected: TypeName::Int,
             found: value.type_name(),
         }
         .into()),

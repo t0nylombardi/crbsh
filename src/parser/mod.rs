@@ -1,5 +1,5 @@
 use crate::lexer::{Token, tokenize};
-use crate::value::{TypeName, Value};
+use crate::runtime::{TypeName, Value};
 
 #[cfg(test)]
 use crate::lexer::TokenizeError;

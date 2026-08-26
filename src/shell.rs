@@ -5,7 +5,7 @@ use crate::builtins::registry::BuiltinRegistry;
 use crate::history::History;
 use crate::jobs::JobManager;
 use crate::parser::{BinaryOperator, Expression, FunctionDefinition, ParsedCommand};
-use crate::value::{TypeName, Value};
+use crate::runtime::{TypeName, Value};
 
 pub const MAX_FUNCTION_CALL_DEPTH: usize = 100;
 
@@ -594,7 +594,7 @@ fn enforce_type(type_annotation: Option<TypeName>, value: &Value) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use crate::parser::{BinaryOperator, Expression};
-    use crate::value::{TypeName, Value};
+    use crate::runtime::{TypeName, Value};
 
     use super::{Shell, ShellError};
 

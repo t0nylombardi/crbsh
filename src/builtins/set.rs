@@ -28,7 +28,7 @@ pub fn run(shell: &mut Shell, args: &[String]) -> BuiltinResult {
 
 #[cfg(test)]
 mod tests {
-    use crate::value::Value;
+    use crate::runtime::Value;
 
     use super::*;
 
