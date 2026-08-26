@@ -1,56 +1,8 @@
-use std::fmt;
+mod error;
+mod token;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Token {
-    Word(String),
-    StringLiteral(String),
-    IntLiteral(i64),
-    BoolLiteral(bool),
-    Assign,
-    Equal,
-    NotEqual,
-    FatArrow,
-    Arrow,
-    Colon,
-    Comma,
-    Plus,
-    Minus,
-    Star,
-    Slash,
-    LeftParen,
-    RightParen,
-    LeftBracket,
-    RightBracket,
-    LessEqual,
-    GreaterEqual,
-    LeftBrace,
-    RightBrace,
-    Wildcard,
-    Pipe,
-    AndIf,
-    OrIf,
-    RedirectOut,
-    RedirectAppend,
-    RedirectIn,
-    Background,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TokenizeError {
-    UnterminatedSingleQuote,
-    UnterminatedDoubleQuote,
-    TrailingEscape,
-}
-
-impl fmt::Display for TokenizeError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnterminatedSingleQuote => write!(formatter, "unterminated single quote"),
-            Self::UnterminatedDoubleQuote => write!(formatter, "unterminated double quote"),
-            Self::TrailingEscape => write!(formatter, "trailing escape"),
-        }
-    }
-}
+pub use error::TokenizeError;
+pub use token::Token;
 
 pub fn tokenize(input: &str) -> Result<Vec<Token>, TokenizeError> {
     let mut tokens = Vec::new();

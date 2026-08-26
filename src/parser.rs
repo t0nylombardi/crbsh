@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::tokens::{Token, TokenizeError, tokenize};
+use crate::lexer::{Token, TokenizeError, tokenize};
 use crate::value::{TypeName, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

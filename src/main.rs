@@ -2,10 +2,10 @@ mod builtins;
 mod executor;
 mod history;
 mod jobs;
+mod lexer;
 mod parser;
 mod prompt;
 mod shell;
-mod tokens;
 mod value;
 
 use std::fs;
