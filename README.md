@@ -1,14 +1,15 @@
 # crbsh
 
-`crbsh` is a modern Unix shell written in Rust. It is not intended to be a Bash
-clone. The current implementation focuses on a small, testable shell core that
-can run traditional Unix programs while experimenting with cleaner shell syntax,
-typed values, structured parsing, and explicit shell state.
+`crbsh` is an early-stage modern Unix shell written in Rust. It runs traditional
+Unix programs without delegating command interpretation to Bash, Zsh, Fish, or
+`/bin/sh`, while providing a cleaner native language for typed values, control
+flow, functions, and structured expressions.
 
-The project is early-stage. The source currently contains an interactive REPL,
-script execution for `.crb` files, a tokenizer/parser, builtin dispatch, native
-values, aliases, history, jobs, pipelines, redirection, and external process
-execution.
+The implementation is organized around explicit boundaries: the lexer produces
+tokens, the parser produces an AST, the runtime evaluates native language
+constructs, and the execution layer owns operating-system processes and I/O.
+Long-lived interactive state remains in the shell instead of leaking into those
+subsystems.
 
 ## Current Features
 
@@ -29,11 +30,15 @@ execution.
 - Job inspection and foregrounding with `jobs` and `fg`.
 - Aliases for command-position expansion.
 - Native variables with `let`, reassignment, and optional type annotations.
-- Native `string`, `int`, and `bool` values.
+- Native `string`, `int`, `bool`, and typed list values.
+- List literals, indexing, `.len`, function arguments, and `for` iteration.
 - Integer arithmetic and comparisons in expressions.
 - Environment overrides through `env.NAME = value`, `export`, and `unset`.
 - Control-flow blocks for `if`, `match`, `while`, and `for`.
-- Function definitions, typed parameters, optional return types, and `return`.
+- Function definitions, typed parameters, return types, nested calls, and
+  recursion-depth protection.
+- Inferred parameters for procedures; value-returning functions require typed
+  parameters and an explicit return type.
 - Simple `for` iteration over integer ranges and one-wildcard file globs.
 
 ## Prerequisites
@@ -191,6 +196,18 @@ let total = add(2, 3)
 print total
 ```
 
+Use typed lists:
+
+```crb
+let names: list<string> = ["Tony", "Alice", "Bob"]
+let first = names[0]
+let count = names.len
+
+for name in names {
+    print name
+}
+```
+
 Run a background job and inspect it:
 
 ```crb
@@ -199,19 +216,67 @@ jobs
 fg 1
 ```
 
+## Architecture
+
+Source moves through a one-way language pipeline:
+
+```text
+source text
+    ↓
+lexer: Vec<Token>
+    ↓
+parser: ParsedInput AST
+    ↓
+runtime evaluator
+    ├── native values, variables, functions, and control flow
+    └── execution layer
+          ├── commands and pipelines
+          ├── redirection
+          └── background jobs
+```
+
+The boundaries are intentionally concrete rather than trait-heavy:
+
+- `lexer` knows characters and tokens, but nothing about execution semantics.
+- `parser` owns grammar and AST construction, but never executes input.
+- `runtime` owns native values, lexical scope, functions, and evaluation.
+- `execution` owns child processes, Unix pipes, redirection, and jobs.
+- `shell.rs` owns persistent session state such as aliases, environment
+  overrides, history, builtin registration, and the last exit code.
+- `main.rs` wires together the REPL, scripts, startup configuration, parsing,
+  and runtime entrypoint.
+
 ## Project Structure
 
 ```text
 src/
-├── main.rs              # Entry point, REPL, script/config loading, evaluation
-├── shell.rs             # Long-lived shell state, variables, aliases, functions
-├── prompt.rs            # Interactive prompt rendering
-├── tokens.rs            # Tokenizer for words, literals, operators, and quotes
-├── parser.rs            # Parser and AST types for commands, pipelines, blocks
-├── executor.rs          # External process execution, pipelines, redirection
-├── history.rs           # Persistent interactive history
-├── jobs.rs              # Background job tracking and foregrounding
-├── value.rs             # Native value and type definitions
+├── main.rs                  # Program entrypoint, REPL, and script/config loading
+├── shell.rs                 # Persistent shell session state
+├── prompt.rs                # Interactive prompt rendering
+├── history.rs               # Persistent interactive history
+├── lexer/
+│   ├── mod.rs               # Tokenization entrypoint
+│   ├── token.rs             # Token definitions
+│   └── error.rs             # Tokenization errors
+├── parser/
+│   ├── mod.rs               # Parser facade
+│   ├── ast.rs               # Commands, expressions, statements, and pipelines
+│   ├── expression.rs        # Expression precedence parser
+│   ├── statement.rs         # Statements, blocks, functions, and pipelines
+│   └── error.rs             # Parse errors and formatting
+├── runtime/
+│   ├── mod.rs               # Runtime facade
+│   ├── value.rs             # Native values and type names
+│   ├── scope.rs             # Lexical scope stack
+│   ├── function.rs          # Function registry and call-depth state
+│   └── evaluator.rs         # AST evaluation and native control flow
+├── execution/
+│   ├── mod.rs               # Execution facade
+│   ├── command.rs           # External command construction and builtin print
+│   ├── pipeline.rs          # Foreground/background pipeline coordination
+│   ├── redirect.rs          # Redirection file handling
+│   ├── jobs.rs              # Background job tracking and foregrounding
+│   └── error.rs             # Structured execution errors
 └── builtins/
     ├── mod.rs           # Builtin result/outcome types
     ├── registry.rs      # Central builtin registry
@@ -231,10 +296,14 @@ src/
 ## Status Notes
 
 `crbsh` is not POSIX-compatible and should not be treated as a drop-in
-replacement for an existing login shell. Builtins are only supported as normal
-single commands, with special executor support for `print` at the start of a
-pipeline. Other builtins are intentionally rejected in pipeline positions and
-as background jobs.
+replacement for an existing login shell. The native grammar is intentionally
+its own language rather than a partial Bash clone.
+
+Builtins are supported as normal single commands. `print` also has explicit
+execution support at the beginning of a pipeline. Other builtins are
+intentionally rejected inside pipelines and as background jobs because their
+shell-state and streaming semantics have not been defined yet.
 
 The parser already supports multiline block forms, but the interactive input
-reader currently continues input based on brace balance.
+reader currently continues input based on brace balance. Pipeline continuations
+and a richer complete/incomplete/invalid input model remain future work.
