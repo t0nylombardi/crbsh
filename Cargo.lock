@@ -3,12 +3,12 @@
 version = 4
 
 [[package]]
-name = "crb-language"
+name = "crab-lang"
 version = "0.1.0"
 
 [[package]]
 name = "crbsh"
 version = "0.1.0"
 dependencies = [
- "crb-language",
+ "crab-lang",
 ]

@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.88"
 
 [workspace]
-members = ["crates/crb-language"]
+members = ["crates/crab-lang"]
 
 [dependencies]
-crb-language = { path = "crates/crb-language" }
+crab-lang = { path = "crates/crab-lang" }

@@ -65,7 +65,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 The repository is a Cargo workspace with two packages:
 
-- `crb-language` owns tokenization, parsing, language and command syntax,
+- `crab-lang` owns tokenization, parsing, language and command syntax,
   native values, lexical scope state, function definitions, and native value
   streams.
 - `crbsh` owns the executable shell host: Unix processes, byte-stream adapters,

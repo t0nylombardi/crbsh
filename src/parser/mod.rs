@@ -1,1 +1,1 @@
-pub use crb_language::parser::*;
+pub use crab_lang::parser::*;

@@ -1,6 +1,6 @@
 mod evaluator;
 
-pub use crb_language::runtime::{
+pub use crab_lang::runtime::{
     LanguageRuntime, ScopeError, ScopeStack, TypeName, Value, ValueStream,
 };
 pub(crate) use evaluator::{ControlFlow, execute_input};
