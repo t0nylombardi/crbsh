@@ -754,8 +754,36 @@ fn parse_pipeline(tokens: Vec<Token>) -> Result<Pipeline, ParseError> {
     let mut commands = Vec::new();
     let mut current: Option<ParsedCommand> = None;
     let mut pending_redirection = None;
+    let mut compound_argument = Vec::new();
+    let mut bracket_depth = 0_usize;
 
     for token in tokens {
+        if bracket_depth > 0 {
+            match &token {
+                Token::LeftBracket => bracket_depth += 1,
+                Token::RightBracket => bracket_depth -= 1,
+                _ => {}
+            }
+            compound_argument.push(token);
+
+            if bracket_depth == 0 {
+                let expression = parse_expression(&compound_argument)?;
+                current
+                    .as_mut()
+                    .expect("compound argument follows a command")
+                    .args
+                    .push(expression);
+                compound_argument.clear();
+            }
+            continue;
+        }
+
+        if matches!(token, Token::LeftBracket) && current.is_some() {
+            bracket_depth = 1;
+            compound_argument.push(token);
+            continue;
+        }
+
         if let Some(redirection) = pending_redirection.take() {
             let target =
                 token_to_redirection_target(&token).ok_or(ParseError::UnexpectedToken(token))?;
@@ -838,6 +866,10 @@ fn parse_pipeline(tokens: Vec<Token>) -> Result<Pipeline, ParseError> {
                 return Err(ParseError::UnexpectedToken(token));
             }
         }
+    }
+
+    if bracket_depth > 0 {
+        return Err(ParseError::UnexpectedToken(Token::LeftBracket));
     }
 
     if pending_redirection.is_some() {

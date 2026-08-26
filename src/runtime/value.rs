@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6,6 +7,7 @@ pub enum Value {
     Int(i64),
     Bool(bool),
     List(Vec<Value>),
+    Record(BTreeMap<String, Value>),
 }
 
 impl Value {
@@ -17,6 +19,7 @@ impl Value {
             Self::List(values) => {
                 TypeName::List(values.first().map(Value::type_name).map(Box::new))
             }
+            Self::Record(_) => TypeName::Record,
         }
     }
 }
@@ -35,6 +38,14 @@ impl fmt::Display for Value {
                     .join(", ");
                 write!(formatter, "[{values}]")
             }
+            Self::Record(fields) => {
+                let fields = fields
+                    .iter()
+                    .map(|(name, value)| format!("{name}: {value}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(formatter, "{{{fields}}}")
+            }
         }
     }
 }
@@ -45,6 +56,7 @@ pub enum TypeName {
     Int,
     Bool,
     List(Option<Box<TypeName>>),
+    Record,
 }
 
 impl TypeName {
@@ -53,6 +65,7 @@ impl TypeName {
             "string" => Some(Self::String),
             "int" => Some(Self::Int),
             "bool" => Some(Self::Bool),
+            "record" => Some(Self::Record),
             _ => input
                 .strip_prefix("list<")
                 .and_then(|inner| inner.strip_suffix('>'))
@@ -70,6 +83,7 @@ impl fmt::Display for TypeName {
             Self::Bool => write!(formatter, "bool"),
             Self::List(Some(element)) => write!(formatter, "list<{element}>"),
             Self::List(None) => write!(formatter, "list<?>"),
+            Self::Record => write!(formatter, "record"),
         }
     }
 }

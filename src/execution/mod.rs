@@ -3,6 +3,7 @@ mod error;
 mod jobs;
 mod pipeline;
 mod redirect;
+mod structured;
 
 pub use error::ExecutionError;
 pub use jobs::{JobError, JobId, JobManager, JobState};

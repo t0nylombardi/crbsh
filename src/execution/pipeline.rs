@@ -7,12 +7,21 @@ use super::command::{
     execute_print, execute_single_external, external_process, print_output, resolved_args,
 };
 use super::redirect::output_file;
+use super::structured;
 use super::{ExecutionError, JobId};
 
 use crate::parser::Pipeline;
 use crate::shell::Shell;
 
 pub fn execute_pipeline(shell: &Shell, pipeline: &Pipeline) -> Result<i32, ExecutionError> {
+    if structured::contains_structured_command(pipeline) {
+        let values = structured::execute_native_pipeline(shell, pipeline)?;
+        for value in values {
+            println!("{value}");
+        }
+        return Ok(0);
+    }
+
     if pipeline.commands.len() == 1 {
         let command = &pipeline.commands[0];
 
