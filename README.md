@@ -1,4 +1,4 @@
-# crbsh
+<p align="center"><img src="crbsh.png" alt="Crbsh"></p>
 
 `crbsh` is a modern experimental Unix shell written in Rust. It executes
 traditional programs directly through `$PATH`, owns its process pipelines, and
