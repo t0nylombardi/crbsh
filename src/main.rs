@@ -349,6 +349,82 @@ fn get_numbers() -> list<int> {
     }
 
     #[test]
+    fn match_expressions_support_literals_nesting_and_first_match_wins() {
+        let mut shell = Shell::new();
+
+        run(
+            &mut shell,
+            "let number = match 1 { 1 => 10, 1 => 20, _ => 30 }",
+        );
+        run(
+            &mut shell,
+            r#"let text = match "crab" {
+    "crab" => "shell"
+    _ => "unknown"
+}"#,
+        );
+        run(
+            &mut shell,
+            r#"let nested = match true {
+    true => match 2 { 2 => "yes", _ => "no" }
+    _ => "no"
+}"#,
+        );
+
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("number".into())),
+            Ok(Value::Int(10))
+        );
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("text".into())),
+            Ok(Value::String("shell".into()))
+        );
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("nested".into())),
+            Ok(Value::String("yes".into()))
+        );
+    }
+
+    #[test]
+    fn nested_statement_match_propagates_function_returns() {
+        let mut shell = Shell::new();
+
+        run(
+            &mut shell,
+            r#"
+fn classify(code: int, ready: bool) -> string {
+    match code {
+        0 => match ready {
+            true => return "ready"
+            _ => return "waiting"
+        }
+        _ => return "failed"
+    }
+}
+"#,
+        );
+        run(&mut shell, "let result = classify(0, true)");
+
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("result".into())),
+            Ok(Value::String("ready".into()))
+        );
+    }
+
+    #[test]
+    fn non_exhaustive_statement_match_is_a_successful_no_op() {
+        let mut shell = Shell::new();
+
+        run(&mut shell, "let result = 10");
+        run(&mut shell, "match 2 {\n1 => result = 20\n}");
+
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("result".into())),
+            Ok(Value::Int(10))
+        );
+    }
+
+    #[test]
     fn list_arguments_execute_in_procedures_and_for_loops() {
         let mut shell = Shell::new();
 

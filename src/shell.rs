@@ -4,7 +4,7 @@ use std::fmt;
 use crate::builtins::registry::BuiltinRegistry;
 use crate::execution::JobManager;
 use crate::history::History;
-use crate::parser::{BinaryOperator, Expression, FunctionDefinition, ParsedCommand};
+use crate::parser::{BinaryOperator, Expression, FunctionDefinition, MatchPattern, ParsedCommand};
 use crate::runtime::{FunctionRegistry, ScopeError, ScopeStack, TypeName, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +40,7 @@ pub enum ShellError {
         len: usize,
     },
     NegativeIndex(i64),
+    NonExhaustiveMatch,
 }
 
 pub struct Shell {
@@ -239,6 +240,21 @@ impl Shell {
             Expression::Index { target, index } => {
                 evaluate_index(self.evaluate(target)?, self.evaluate(index)?)
             }
+            Expression::Match { value, arms } => {
+                let value = self.evaluate(value)?;
+                let arm = arms
+                    .iter()
+                    .find(|arm| match &arm.pattern {
+                        MatchPattern::Wildcard => true,
+                        MatchPattern::Literal(pattern) => pattern == &value,
+                        MatchPattern::Status => value == Value::Int(i64::from(self.exit_code)),
+                        MatchPattern::Identifier(name) => self
+                            .evaluate(&Expression::Identifier(name.clone()))
+                            .is_ok_and(|pattern| pattern == value),
+                    })
+                    .ok_or(ShellError::NonExhaustiveMatch)?;
+                self.evaluate(&arm.value)
+            }
             Expression::Len(target) => evaluate_len(self.evaluate(target)?),
             Expression::Call { name, .. } => Err(ShellError::UnsupportedCall(name.clone())),
         }
@@ -348,6 +364,7 @@ impl fmt::Display for ShellError {
             Self::NegativeIndex(index) => {
                 write!(formatter, "list index cannot be negative: {index}")
             }
+            Self::NonExhaustiveMatch => write!(formatter, "non-exhaustive match expression"),
         }
     }
 }

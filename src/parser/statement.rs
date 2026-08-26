@@ -222,20 +222,49 @@ fn parse_match(input: &str) -> Result<ParsedInput, ParseError> {
         .map(str::trim)
         .ok_or(ParseError::MissingBlockStart)?;
     let mut arms = Vec::new();
+    let mut index = 1;
+    let mut closed = false;
 
-    for line in lines.iter().skip(1) {
-        if *line == "}" {
-            continue;
+    while index < lines.len() {
+        let line = lines[index];
+        if line == "}" {
+            closed = true;
+            index += 1;
+            break;
         }
 
-        let Some((pattern, body)) = line.split_once("=>") else {
+        let Some((pattern, first_body_line)) = line.split_once("=>") else {
             return Err(ParseError::MissingMatchArrow);
         };
 
         let pattern = parse_match_pattern(pattern.trim())?;
-        let body = parse(body.trim())?;
+        let mut body_source = first_body_line.trim().to_string();
+        let mut depth = brace_delta(&body_source);
+        index += 1;
+
+        while depth > 0 && index < lines.len() {
+            body_source.push('\n');
+            body_source.push_str(lines[index]);
+            depth += brace_delta(lines[index]);
+            index += 1;
+        }
+
+        if depth != 0 {
+            return Err(ParseError::MissingBlockEnd);
+        }
+
+        let body = parse(&body_source)?;
 
         arms.push(MatchArm { pattern, body });
+    }
+
+    if !closed {
+        return Err(ParseError::MissingBlockEnd);
+    }
+    if index < lines.len() {
+        return Err(ParseError::UnexpectedToken(Token::Word(
+            lines[index].into(),
+        )));
     }
 
     Ok(ParsedInput::Match {
@@ -1465,6 +1494,59 @@ match environment {
         MatchPattern::Literal(Value::String("production".into()))
     );
     assert_eq!(arms[2].pattern, MatchPattern::Wildcard);
+}
+
+#[test]
+fn parses_exhaustive_match_expression() {
+    let result = parse(
+        r#"let label = match status {
+    0 => "success"
+    1 => "failure"
+    _ => "unknown"
+}"#,
+    )
+    .unwrap();
+
+    let ParsedInput::Let { value, .. } = result else {
+        panic!("expected let statement");
+    };
+    let Expression::Match { value, arms } = value else {
+        panic!("expected match expression");
+    };
+
+    assert_eq!(*value, Expression::Status);
+    assert_eq!(arms.len(), 3);
+    assert_eq!(arms[0].pattern, MatchPattern::Literal(Value::Int(0)));
+    assert_eq!(arms[2].pattern, MatchPattern::Wildcard);
+}
+
+#[test]
+fn rejects_non_exhaustive_match_expression() {
+    assert_eq!(
+        parse("let label = match status { 0 => \"success\" }"),
+        Err(ParseError::NonExhaustiveMatchExpression)
+    );
+}
+
+#[test]
+fn parses_nested_statement_match() {
+    let result = parse(
+        r#"
+match status {
+    0 => match ready {
+        true => print "ready"
+        _ => print "not ready"
+    }
+    _ => print "failed"
+}
+"#,
+    )
+    .unwrap();
+
+    let ParsedInput::Match { arms, .. } = result else {
+        panic!("expected match statement");
+    };
+    assert!(matches!(arms[0].body, ParsedInput::Match { .. }));
 }
 
 #[test]

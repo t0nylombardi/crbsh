@@ -372,7 +372,10 @@ fn raw_builtin_arg(argument: &Expression) -> Result<String, ShellError> {
             raw_builtin_arg(right)?
         ),
         Expression::Call { name, .. } => name.clone(),
-        Expression::List(_) | Expression::Index { .. } | Expression::Len(_) => {
+        Expression::List(_)
+        | Expression::Index { .. }
+        | Expression::Match { .. }
+        | Expression::Len(_) => {
             return Err(ShellError::UnsupportedCall("complex raw argument".into()));
         }
     })
@@ -674,6 +677,14 @@ pub(crate) fn evaluate_expression(
             let target = evaluate_expression(shell, target)?;
             let index = evaluate_expression(shell, index)?;
             shell::evaluate_index(target, index).map_err(Into::into)
+        }
+        parser::Expression::Match { value, arms } => {
+            let value = evaluate_expression(shell, value)?;
+            let arm = arms
+                .iter()
+                .find(|arm| pattern_matches(shell, &value, &arm.pattern))
+                .ok_or(ShellError::NonExhaustiveMatch)?;
+            evaluate_expression(shell, &arm.value)
         }
         parser::Expression::Len(target) => {
             let target = evaluate_expression(shell, target)?;

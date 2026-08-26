@@ -21,6 +21,7 @@ pub enum ParseError {
     MissingReturnType,
     MissingMatchArrow,
     MissingMatchPattern,
+    NonExhaustiveMatchExpression,
     ReservedName(String),
     UnsupportedRedirection(Token),
     UnexpectedToken(Token),
@@ -56,6 +57,9 @@ impl fmt::Display for ParseError {
             Self::MissingReturnType => write!(formatter, "missing return type"),
             Self::MissingMatchArrow => write!(formatter, "missing match arrow '=>'"),
             Self::MissingMatchPattern => write!(formatter, "missing match pattern"),
+            Self::NonExhaustiveMatchExpression => {
+                write!(formatter, "match expression requires a wildcard '_' arm")
+            }
             Self::ReservedName(name) => {
                 write!(formatter, "cannot assign to reserved name '{name}'")
             }

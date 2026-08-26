@@ -1,7 +1,7 @@
 use crate::lexer::Token;
 use crate::runtime::Value;
 
-use super::ast::{BinaryOperator, Expression};
+use super::ast::{BinaryOperator, Expression, MatchExpressionArm, MatchPattern};
 use super::error::ParseError;
 
 pub(super) fn parse_expression(tokens: &[Token]) -> Result<Expression, ParseError> {
@@ -101,6 +101,10 @@ impl<'a> ExpressionParser<'a> {
             return self.parse_list();
         }
 
+        if matches!(token, Token::Word(keyword) if keyword == "match") {
+            return self.parse_match();
+        }
+
         if let Token::Word(name) = token
             && matches!(self.peek(), Some(Token::LeftParen))
         {
@@ -112,6 +116,59 @@ impl<'a> ExpressionParser<'a> {
         let expression =
             token_to_expression(token).ok_or_else(|| ParseError::UnexpectedToken(token.clone()))?;
         self.parse_postfix(expression)
+    }
+
+    fn parse_match(&mut self) -> Result<Expression, ParseError> {
+        let value = self.parse_equality()?;
+        match self.advance() {
+            Some(Token::LeftBrace) => {}
+            Some(token) => return Err(ParseError::UnexpectedToken(token.clone())),
+            None => return Err(ParseError::MissingBlockStart),
+        }
+
+        let mut arms = Vec::new();
+        while !matches!(self.peek(), Some(Token::RightBrace)) {
+            let pattern = self.parse_match_pattern()?;
+            match self.advance() {
+                Some(Token::FatArrow) => {}
+                Some(token) => return Err(ParseError::UnexpectedToken(token.clone())),
+                None => return Err(ParseError::MissingMatchArrow),
+            }
+            let value = self.parse_equality()?;
+            arms.push(MatchExpressionArm { pattern, value });
+
+            if matches!(self.peek(), Some(Token::Comma)) {
+                self.position += 1;
+            }
+        }
+
+        if self.advance().is_none() {
+            return Err(ParseError::MissingBlockEnd);
+        }
+        if !arms
+            .iter()
+            .any(|arm| matches!(arm.pattern, MatchPattern::Wildcard))
+        {
+            return Err(ParseError::NonExhaustiveMatchExpression);
+        }
+
+        self.parse_postfix(Expression::Match {
+            value: Box::new(value),
+            arms,
+        })
+    }
+
+    fn parse_match_pattern(&mut self) -> Result<MatchPattern, ParseError> {
+        match self.advance() {
+            Some(Token::Wildcard) => Ok(MatchPattern::Wildcard),
+            Some(Token::StringLiteral(value)) => {
+                Ok(MatchPattern::Literal(Value::String(value.clone())))
+            }
+            Some(Token::IntLiteral(value)) => Ok(MatchPattern::Literal(Value::Int(*value))),
+            Some(Token::BoolLiteral(value)) => Ok(MatchPattern::Literal(Value::Bool(*value))),
+            Some(token) => Err(ParseError::UnexpectedToken(token.clone())),
+            None => Err(ParseError::MissingMatchPattern),
+        }
     }
 
     fn parse_list(&mut self) -> Result<Expression, ParseError> {

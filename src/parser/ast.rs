@@ -22,12 +22,22 @@ pub enum Expression {
         target: Box<Expression>,
         index: Box<Expression>,
     },
+    Match {
+        value: Box<Expression>,
+        arms: Vec<MatchExpressionArm>,
+    },
     Len(Box<Expression>),
     Binary {
         left: Box<Expression>,
         operator: BinaryOperator,
         right: Box<Expression>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchExpressionArm {
+    pub pattern: MatchPattern,
+    pub value: Expression,
 }
 
 impl From<Value> for Expression {
