@@ -5,9 +5,7 @@ use crate::builtins::registry::BuiltinRegistry;
 use crate::execution::JobManager;
 use crate::history::History;
 use crate::parser::{BinaryOperator, Expression, FunctionDefinition, ParsedCommand};
-use crate::runtime::{ScopeError, ScopeStack, TypeName, Value};
-
-pub const MAX_FUNCTION_CALL_DEPTH: usize = 100;
+use crate::runtime::{FunctionRegistry, ScopeError, ScopeStack, TypeName, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AliasError {
@@ -51,9 +49,8 @@ pub struct Shell {
     pub jobs: JobManager,
     pub exit_code: i32,
     scopes: ScopeStack,
-    functions: HashMap<String, FunctionDefinition>,
+    functions: FunctionRegistry,
     environment: HashMap<String, String>,
-    function_call_depth: usize,
 }
 
 impl Shell {
@@ -65,9 +62,8 @@ impl Shell {
             jobs: JobManager::new(),
             exit_code: 0,
             scopes: ScopeStack::new(),
-            functions: HashMap::new(),
+            functions: FunctionRegistry::new(),
             environment: HashMap::new(),
-            function_call_depth: 0,
         }
     }
 
@@ -161,25 +157,19 @@ impl Shell {
     }
 
     pub fn define_function(&mut self, name: impl Into<String>, definition: FunctionDefinition) {
-        self.functions.insert(name.into(), definition);
+        self.functions.define(name.into(), definition);
     }
 
     pub fn function(&self, name: &str) -> Option<FunctionDefinition> {
-        self.functions.get(name).cloned()
+        self.functions.get(name)
     }
 
     pub fn enter_function_call(&mut self) -> Result<(), usize> {
-        if self.function_call_depth >= MAX_FUNCTION_CALL_DEPTH {
-            return Err(MAX_FUNCTION_CALL_DEPTH);
-        }
-
-        self.function_call_depth += 1;
-        Ok(())
+        self.functions.enter_call()
     }
 
     pub fn exit_function_call(&mut self) {
-        debug_assert!(self.function_call_depth > 0);
-        self.function_call_depth = self.function_call_depth.saturating_sub(1);
+        self.functions.exit_call();
     }
 
     pub fn set_environment(&mut self, name: impl Into<String>, value: impl Into<String>) {
