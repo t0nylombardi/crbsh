@@ -7,6 +7,7 @@ use super::command::{
     execute_print, execute_single_external, external_process, print_output, resolved_args,
 };
 use super::redirect::output_file;
+use super::render::render_pipeline_output;
 use super::structured;
 use super::{ExecutionError, JobId};
 
@@ -16,21 +17,11 @@ use crate::shell::Shell;
 pub fn execute_pipeline(shell: &Shell, pipeline: &Pipeline) -> Result<i32, ExecutionError> {
     if structured::contains_structured_command(pipeline) {
         let output = structured::execute_structured_pipeline(shell, pipeline)?;
-        match output.data {
-            structured::PipelineData::Text(bytes) => {
-                std::io::stdout()
-                    .write_all(&bytes)
-                    .map_err(|error| ExecutionError {
-                        command: "<pipeline>".into(),
-                        message: error.to_string(),
-                    })?;
-            }
-            structured::PipelineData::Structured(values) => {
-                for value in values {
-                    println!("{value}");
-                }
-            }
-        }
+        let final_command = pipeline
+            .commands
+            .last()
+            .expect("structured pipeline contains at least one command");
+        render_pipeline_output(final_command, output.data)?;
         return Ok(output.exit_code);
     }
 
@@ -423,6 +414,22 @@ mod tests {
 
         assert_eq!(code, 0);
         assert_eq!(fs::read_to_string(output).unwrap(), "first\nsecond\n");
+    }
+
+    #[test]
+    fn renders_structured_pipeline_output_to_file() {
+        let dir = temp_dir("renders_structured_pipeline_output_to_file");
+        let output = dir.join("values.txt");
+        let shell = Shell::new();
+        let crate::parser::ParsedInput::Pipeline(pipeline) =
+            crate::parser::parse(&format!("values [1, 2, 3] | take 2 > {}", output.display()))
+                .unwrap()
+        else {
+            panic!("expected pipeline");
+        };
+
+        assert_eq!(execute_pipeline(&shell, &pipeline).unwrap(), 0);
+        assert_eq!(fs::read_to_string(output).unwrap(), "1\n2\n");
     }
 
     #[test]

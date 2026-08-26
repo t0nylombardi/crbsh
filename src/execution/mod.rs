@@ -3,6 +3,7 @@ mod error;
 mod jobs;
 mod pipeline;
 mod redirect;
+mod render;
 mod structured;
 
 pub use error::ExecutionError;

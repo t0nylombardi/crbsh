@@ -39,11 +39,18 @@ pub(super) fn execute_structured_pipeline(
     let mut exit_code = 0;
 
     for (index, command) in pipeline.commands.iter().enumerate() {
-        if !command.redirections.is_empty() {
+        if command.redirections.stdin.is_some() {
             return Err(stage_error(
                 index,
                 command,
-                "redirection requires the structured pipeline renderer",
+                "input redirection is not supported in structured pipelines",
+            ));
+        }
+        if command.redirections.stdout.is_some() && index + 1 != pipeline.commands.len() {
+            return Err(stage_error(
+                index,
+                command,
+                "output redirection is only valid on the final stage",
             ));
         }
 
