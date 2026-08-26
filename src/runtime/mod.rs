@@ -1,6 +1,7 @@
 mod evaluator;
 mod function;
 mod scope;
+mod state;
 mod value;
 
 pub(crate) use evaluator::{ControlFlow, execute_input};
@@ -8,4 +9,5 @@ pub(crate) use evaluator::{ControlFlow, execute_input};
 pub(crate) use evaluator::{evaluate_expression, execute_function_call, glob_values};
 pub(crate) use function::FunctionRegistry;
 pub(crate) use scope::{ScopeError, ScopeStack};
+pub(crate) use state::LanguageRuntime;
 pub use value::{TypeName, Value};

@@ -5,7 +5,7 @@ use crate::builtins::registry::BuiltinRegistry;
 use crate::execution::JobManager;
 use crate::history::History;
 use crate::parser::{BinaryOperator, Expression, FunctionDefinition, MatchPattern, ParsedCommand};
-use crate::runtime::{FunctionRegistry, ScopeError, ScopeStack, TypeName, Value};
+use crate::runtime::{LanguageRuntime, ScopeError, ScopeStack, TypeName, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AliasError {
@@ -49,8 +49,7 @@ pub struct Shell {
     pub history: History,
     pub jobs: JobManager,
     pub exit_code: i32,
-    scopes: ScopeStack,
-    functions: FunctionRegistry,
+    runtime: LanguageRuntime,
     environment: HashMap<String, String>,
 }
 
@@ -62,8 +61,7 @@ impl Shell {
             history: History::default(),
             jobs: JobManager::new(),
             exit_code: 0,
-            scopes: ScopeStack::new(),
-            functions: FunctionRegistry::new(),
+            runtime: LanguageRuntime::new(),
             environment: HashMap::new(),
         }
     }
@@ -113,22 +111,22 @@ impl Shell {
     /// Adds a lexical block scope. Variable lookup walks these frames from the
     /// innermost block toward the outermost visible scope.
     pub fn push_scope(&mut self) {
-        self.scopes.push();
+        self.runtime.push_scope();
     }
 
     pub fn pop_scope(&mut self) {
-        self.scopes.pop();
+        self.runtime.pop_scope();
     }
 
     /// Replaces the caller's local scopes with a fresh function scope while
     /// keeping the global scope visible. The returned scopes must be restored
     /// after the function finishes.
     pub(crate) fn enter_function_scope(&mut self) -> ScopeStack {
-        self.scopes.enter_function()
+        self.runtime.enter_function_scope()
     }
 
     pub(crate) fn restore_caller_scopes(&mut self, scopes: ScopeStack) {
-        self.scopes = scopes;
+        self.runtime.restore_caller_scopes(scopes);
     }
 
     pub fn declare_variable(
@@ -137,8 +135,8 @@ impl Shell {
         type_annotation: Option<TypeName>,
         value: Value,
     ) -> Result<(), ShellError> {
-        self.scopes
-            .declare(name.into(), type_annotation, value)
+        self.runtime
+            .declare_variable(name.into(), type_annotation, value)
             .map_err(ShellError::from)
     }
 
@@ -147,30 +145,30 @@ impl Shell {
         name: impl Into<String>,
         value: Value,
     ) -> Result<(), ShellError> {
-        self.scopes
-            .assign(name.into(), value)
+        self.runtime
+            .assign_variable(name.into(), value)
             .map_err(ShellError::from)
     }
 
     #[cfg(test)]
     pub fn set_variable(&mut self, name: impl Into<String>, value: Value) {
-        self.scopes.set(name.into(), value);
+        self.runtime.set_variable(name.into(), value);
     }
 
     pub fn define_function(&mut self, name: impl Into<String>, definition: FunctionDefinition) {
-        self.functions.define(name.into(), definition);
+        self.runtime.define_function(name.into(), definition);
     }
 
     pub fn function(&self, name: &str) -> Option<FunctionDefinition> {
-        self.functions.get(name)
+        self.runtime.function(name)
     }
 
     pub fn enter_function_call(&mut self) -> Result<(), usize> {
-        self.functions.enter_call()
+        self.runtime.enter_function_call()
     }
 
     pub fn exit_function_call(&mut self) {
-        self.functions.exit_call();
+        self.runtime.exit_function_call();
     }
 
     pub fn set_environment(&mut self, name: impl Into<String>, value: impl Into<String>) {
@@ -188,15 +186,15 @@ impl Shell {
     }
 
     pub fn variables(&self) -> Vec<(String, Value)> {
-        self.scopes.visible_values()
+        self.runtime.variables()
     }
 
     pub fn variable_value(&self, name: &str) -> Option<Value> {
-        self.scopes.value(name)
+        self.runtime.variable_value(name)
     }
 
     pub fn export_variable(&mut self, name: &str) -> Result<(), ShellError> {
-        let Some(value) = self.scopes.value(name) else {
+        let Some(value) = self.runtime.variable_value(name) else {
             return Err(ShellError::VariableNotDefined(name.into()));
         };
 
@@ -206,15 +204,15 @@ impl Shell {
     }
 
     pub fn unset_variable(&mut self, name: &str) -> bool {
-        self.scopes.remove(name)
+        self.runtime.remove_variable(name)
     }
 
     pub fn evaluate(&self, expression: &Expression) -> Result<Value, ShellError> {
         match expression {
             Expression::Literal(value) => Ok(value.clone()),
             Expression::Identifier(name) => self
-                .scopes
-                .value(name)
+                .runtime
+                .variable_value(name)
                 .ok_or_else(|| ShellError::UndefinedVariable(name.clone())),
             Expression::EnvironmentVariable(name) => self
                 .environment_value(name)
@@ -249,8 +247,9 @@ impl Shell {
                         MatchPattern::Literal(pattern) => pattern == &value,
                         MatchPattern::Status => value == Value::Int(i64::from(self.exit_code)),
                         MatchPattern::Identifier(name) => self
-                            .evaluate(&Expression::Identifier(name.clone()))
-                            .is_ok_and(|pattern| pattern == value),
+                            .runtime
+                            .variable_value(name)
+                            .is_some_and(|pattern| pattern == value),
                     })
                     .ok_or(ShellError::NonExhaustiveMatch)?;
                 self.evaluate(&arm.value)
@@ -263,8 +262,8 @@ impl Shell {
     pub fn resolve_argument(&self, expression: &Expression) -> Result<String, ShellError> {
         match expression {
             Expression::Identifier(name) => Ok(self
-                .scopes
-                .value(name)
+                .runtime
+                .variable_value(name)
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| name.clone())),
             _ => self.evaluate(expression).map(|value| value.to_string()),
