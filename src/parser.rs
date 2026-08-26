@@ -2174,6 +2174,32 @@ fn parses_function_call_expression() {
 }
 
 #[test]
+fn parses_nested_function_call_expressions() {
+    let result = parse("let total = add(double(2), add(1, 2))");
+
+    assert_eq!(
+        result,
+        Ok(ParsedInput::Let {
+            name: "total".into(),
+            type_annotation: None,
+            value: Expression::Call {
+                name: "add".into(),
+                args: vec![
+                    Expression::Call {
+                        name: "double".into(),
+                        args: vec![Value::Int(2).into()],
+                    },
+                    Expression::Call {
+                        name: "add".into(),
+                        args: vec![Value::Int(1).into(), Value::Int(2).into()],
+                    },
+                ],
+            },
+        })
+    );
+}
+
+#[test]
 fn parses_return_without_value() {
     let result = parse("return");
 

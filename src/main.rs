@@ -1055,6 +1055,100 @@ fn add(a: int, b: int) -> int {
     }
 
     #[test]
+    fn nested_function_calls_compose_inside_larger_expressions() {
+        let mut shell = Shell::new();
+
+        run(
+            &mut shell,
+            r#"
+fn add(a: int, b: int) -> int {
+    return a + b
+}
+"#,
+        );
+        run(
+            &mut shell,
+            r#"
+fn double(value: int) -> int {
+    return value * 2
+}
+"#,
+        );
+        run(&mut shell, "let total = add(double(2), add(1, 2)) * 2");
+        run(&mut shell, "let matches = add(2, 3) == 5");
+
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("total".into())),
+            Ok(Value::Int(14))
+        );
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("matches".into())),
+            Ok(Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn nested_call_arguments_report_the_first_error() {
+        let mut shell = Shell::new();
+
+        run(
+            &mut shell,
+            r#"
+fn add(a: int, b: int) -> int {
+    return a + b
+}
+"#,
+        );
+
+        let expression = Expression::Call {
+            name: "add".into(),
+            args: vec![
+                Expression::Call {
+                    name: "first_missing".into(),
+                    args: Vec::new(),
+                },
+                Expression::Call {
+                    name: "second_missing".into(),
+                    args: Vec::new(),
+                },
+            ],
+        };
+
+        let Err(error) = evaluate_expression(&mut shell, &expression) else {
+            panic!("nested call should fail");
+        };
+
+        assert_eq!(error.to_string(), "undefined function 'first_missing'");
+    }
+
+    #[test]
+    fn procedure_call_is_rejected_when_an_expression_requires_a_value() {
+        let mut shell = Shell::new();
+
+        run(
+            &mut shell,
+            r#"
+fn consume(value) {
+    let copy = value
+}
+"#,
+        );
+
+        let expression = Expression::Call {
+            name: "consume".into(),
+            args: vec![Value::Int(7).into()],
+        };
+        let Err(error) = evaluate_expression(&mut shell, &expression) else {
+            panic!("procedure call should not produce a value");
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "function 'consume' did not return a value"
+        );
+    }
+
+    #[test]
     fn recursive_function_calls_return_values() {
         let mut shell = Shell::new();
 
