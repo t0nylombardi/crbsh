@@ -101,6 +101,12 @@ call sites and inside function bodies, enforces declared return types, and
 rejects value-returning functions that can fall through. Nested function
 signatures follow lexical block scope and do not escape their defining scope.
 
+Control-flow checks require boolean `if` and `while` conditions. `for` ranges
+require integer bounds, list expressions provide their element type to the loop
+binding, and filesystem globs provide strings. Match patterns must be compatible
+with the matched value, and every match-expression arm must produce a compatible
+result type. Unreachable and dead-code analysis is intentionally deferred.
+
 This is currently a library interface, not an execution gate in `crbsh`.
 Ordinary Unix command arguments remain host syntax because a bare command word
 and a language identifier currently share one AST representation. Function

@@ -308,7 +308,6 @@ impl TypeChecker {
     }
 
     fn check_for(&mut self, name: &str, iterable: &Iterable, body: &[ParsedInput]) {
-        let diagnostic_start = self.diagnostics.len();
         let element_type = match iterable {
             Iterable::Range { start, end, .. } => {
                 self.expect(start, TypeName::Int, TypeDiagnosticKind::RangeBound);
@@ -334,7 +333,7 @@ impl TypeChecker {
         self.unknowns.push(HashSet::new());
         if let Some(element_type) = element_type {
             let _ = self.context.declare(name.into(), element_type);
-        } else if self.diagnostics.len() == diagnostic_start {
+        } else {
             self.declare_unknown(name.into());
         }
         self.check_statements(body);
@@ -1007,6 +1006,142 @@ mod tests {
     fn checks_loop_iterables_and_loop_variable_scope() {
         let program = [parsed(
             "for number in [1, 2] {\n    let doubled: int = number * 2\n}",
+        )];
+
+        assert_eq!(TypeChecker::check(&program), Ok(()));
+    }
+
+    #[test]
+    fn requires_boolean_if_and_while_conditions() {
+        let program = [
+            parsed(
+                "if 1 {\n    print \"never\"\n} else if \"also wrong\" {\n    print \"never\"\n}",
+            ),
+            parsed("while [true] {\n    break\n}"),
+        ];
+
+        let diagnostics = TypeChecker::check(&program).unwrap_err();
+
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.kind == TypeDiagnosticKind::Condition)
+                .count(),
+            3
+        );
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == TypeDiagnosticKind::Condition
+                && diagnostic.expected == Some(TypeName::Bool)
+                && diagnostic.found == Some(TypeName::Int)
+        }));
+    }
+
+    #[test]
+    fn accepts_boolean_if_and_while_conditions() {
+        let program = [
+            parsed("if true {\n    print \"yes\"\n}"),
+            parsed("while 1 < 2 {\n    break\n}"),
+        ];
+
+        assert_eq!(TypeChecker::check(&program), Ok(()));
+    }
+
+    #[test]
+    fn validates_range_bounds_and_iterable_expressions() {
+        let program = [
+            parsed("for number in \"start\"..3 {\n    print number\n}"),
+            parsed("for item in true {\n    print item\n}"),
+        ];
+
+        let diagnostics = TypeChecker::check(&program).unwrap_err();
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == TypeDiagnosticKind::RangeBound
+                && diagnostic.expected == Some(TypeName::Int)
+                && diagnostic.found == Some(TypeName::String)
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == TypeDiagnosticKind::Iterable
+                && diagnostic.expected == Some(TypeName::List(None))
+                && diagnostic.found == Some(TypeName::Bool)
+        }));
+        assert!(!diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == TypeDiagnosticKind::UndefinedVariable("item".into())
+        }));
+    }
+
+    #[test]
+    fn assigns_string_and_integer_types_to_host_and_range_iterators() {
+        let program = [
+            parsed("for file in src/*.rs {\n    let path: string = file\n}"),
+            parsed("for number in 0..=3 {\n    let value: int = number\n}"),
+        ];
+
+        assert_eq!(TypeChecker::check(&program), Ok(()));
+    }
+
+    #[test]
+    fn rejects_incompatible_statement_match_patterns() {
+        let program = [parsed(
+            "match 1 {\n    \"one\" => print \"wrong\"\n    true => print \"also wrong\"\n    _ => print \"fallback\"\n}",
+        )];
+
+        let diagnostics = TypeChecker::check(&program).unwrap_err();
+
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.kind == TypeDiagnosticKind::MatchPattern)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn checks_identifier_and_status_match_pattern_types() {
+        let program = [
+            parsed("let label = \"ready\""),
+            parsed(
+                "match true {\n    label => print \"wrong\"\n    status => print \"wrong\"\n    _ => print \"fallback\"\n}",
+            ),
+        ];
+
+        let diagnostics = TypeChecker::check(&program).unwrap_err();
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == TypeDiagnosticKind::MatchPattern
+                && diagnostic.found == Some(TypeName::String)
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == TypeDiagnosticKind::MatchPattern
+                && diagnostic.found == Some(TypeName::Int)
+        }));
+    }
+
+    #[test]
+    fn rejects_incompatible_match_expression_patterns_and_results() {
+        let program = [parsed(
+            "let result = match true { 1 => \"wrong pattern\", true => \"yes\", _ => 0 }",
+        )];
+
+        let diagnostics = TypeChecker::check(&program).unwrap_err();
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == TypeDiagnosticKind::MatchPattern
+                && diagnostic.expected == Some(TypeName::Bool)
+                && diagnostic.found == Some(TypeName::Int)
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == TypeDiagnosticKind::MatchArm
+                && diagnostic.expected == Some(TypeName::String)
+                && diagnostic.found == Some(TypeName::Int)
+        }));
+    }
+
+    #[test]
+    fn unifies_compatible_match_expression_result_types() {
+        let program = [parsed(
+            "let result: list<int> = match true { true => [], _ => [1, 2] }",
         )];
 
         assert_eq!(TypeChecker::check(&program), Ok(()));
