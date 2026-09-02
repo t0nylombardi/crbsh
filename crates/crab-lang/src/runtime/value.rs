@@ -19,7 +19,12 @@ impl Value {
             Self::List(values) => {
                 TypeName::List(values.first().map(Value::type_name).map(Box::new))
             }
-            Self::Record(_) => TypeName::Record,
+            Self::Record(fields) => TypeName::Record(Some(
+                fields
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.type_name()))
+                    .collect(),
+            )),
         }
     }
 }
@@ -56,7 +61,7 @@ pub enum TypeName {
     Int,
     Bool,
     List(Option<Box<TypeName>>),
-    Record,
+    Record(Option<BTreeMap<String, TypeName>>),
 }
 
 impl TypeName {
@@ -65,7 +70,7 @@ impl TypeName {
             "string" => Some(Self::String),
             "int" => Some(Self::Int),
             "bool" => Some(Self::Bool),
-            "record" => Some(Self::Record),
+            "record" => Some(Self::Record(None)),
             _ => input
                 .strip_prefix("list<")
                 .and_then(|inner| inner.strip_suffix('>'))
@@ -83,7 +88,15 @@ impl fmt::Display for TypeName {
             Self::Bool => write!(formatter, "bool"),
             Self::List(Some(element)) => write!(formatter, "list<{element}>"),
             Self::List(None) => write!(formatter, "list<?>"),
-            Self::Record => write!(formatter, "record"),
+            Self::Record(Some(fields)) => {
+                let fields = fields
+                    .iter()
+                    .map(|(name, type_name)| format!("{name}: {type_name}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(formatter, "record{{{fields}}}")
+            }
+            Self::Record(None) => write!(formatter, "record"),
         }
     }
 }
@@ -93,6 +106,15 @@ impl TypeName {
         match (self, actual) {
             (Self::List(Some(expected)), Self::List(Some(actual))) => expected.accepts(actual),
             (Self::List(_), Self::List(None)) | (Self::List(None), Self::List(_)) => true,
+            (Self::Record(Some(expected)), Self::Record(Some(actual))) => {
+                expected.len() == actual.len()
+                    && expected.iter().all(|(name, expected_type)| {
+                        actual
+                            .get(name)
+                            .is_some_and(|actual_type| expected_type.accepts(actual_type))
+                    })
+            }
+            (Self::Record(_), Self::Record(None)) | (Self::Record(None), Self::Record(_)) => true,
             _ => self == actual,
         }
     }

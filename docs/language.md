@@ -60,6 +60,11 @@ record name "Tony" active true
 ```
 
 Records are atomic values when passed through structured pipelines.
+The language type model tracks the fields of known record values, so field
+access such as `user.name` preserves the field's type and reports an explicit
+diagnostic when a known record has no such field. A plain `record` annotation
+has an unknown shape, so its fields cannot be proven until shape information is
+available.
 
 ## Expressions
 
@@ -84,6 +89,11 @@ Its `TypeChecker` validates lexical declarations and assignments, infers
 expression types, applies operator rules, and returns diagnostics containing
 expected and found types when both are known. `TypeContext` provides the
 lexical type scopes used by the checker.
+
+List literals infer their element type and reject heterogeneous elements.
+Explicit annotations provide the element type for empty lists. Indexing
+requires an integer index and a list target. Known record shapes retain each
+field's type and produce missing-field diagnostics.
 
 Function signatures are collected before bodies are checked, so forward and
 recursive calls can be validated. The checker verifies typed parameters at

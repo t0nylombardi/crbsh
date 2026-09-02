@@ -213,11 +213,20 @@ impl<'a> ExpressionParser<'a> {
                 continue;
             }
 
-            if let Expression::Identifier(name) = &expression
-                && let Some(target) = name.strip_suffix(".len")
+            if let Expression::Identifier(path) = &expression
+                && let Some((target, member)) = path.rsplit_once('.')
                 && !target.is_empty()
+                && !member.is_empty()
             {
-                expression = Expression::Len(Box::new(word_to_expression(target.into())));
+                let target = Box::new(parse_member_target(target));
+                expression = if member == "len" {
+                    Expression::Len(target)
+                } else {
+                    Expression::Field {
+                        target,
+                        name: member.into(),
+                    }
+                };
             }
             break;
         }
@@ -324,6 +333,21 @@ impl<'a> ExpressionParser<'a> {
         let token = self.peek()?;
         self.position += 1;
         Some(token)
+    }
+}
+
+fn parse_member_target(path: &str) -> Expression {
+    let Some((target, field)) = path.split_once('.') else {
+        return word_to_expression(path.into());
+    };
+    let target = Box::new(parse_member_target(target));
+    if field == "len" {
+        Expression::Len(target)
+    } else {
+        Expression::Field {
+            target,
+            name: field.into(),
+        }
     }
 }
 

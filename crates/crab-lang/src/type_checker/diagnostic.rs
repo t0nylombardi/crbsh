@@ -50,6 +50,8 @@ pub enum TypeDiagnosticKind {
     ListElement,
     Index,
     IndexTarget,
+    FieldTarget,
+    MissingRecordField(String),
     LengthTarget,
     MatchPattern,
     MatchArm,
@@ -95,6 +97,9 @@ impl fmt::Display for TypeDiagnostic {
             }
             TypeDiagnosticKind::UnexpectedReturnValue => {
                 write!(formatter, "procedure cannot return a value")
+            }
+            TypeDiagnosticKind::MissingRecordField(name) => {
+                write!(formatter, "record has no field '{name}'")
             }
             kind => write!(formatter, "type error in {kind:?}"),
         }

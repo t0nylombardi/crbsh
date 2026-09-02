@@ -1021,6 +1021,24 @@ fn parses_list_index_and_len_arguments() {
 }
 
 #[test]
+fn parses_record_field_access() {
+    let ParsedInput::Let { value, .. } = parse("let name = user.profile.name").unwrap() else {
+        panic!("expected declaration");
+    };
+
+    assert_eq!(
+        value,
+        Expression::Field {
+            target: Box::new(Expression::Field {
+                target: Box::new(Expression::Identifier("user".into())),
+                name: "profile".into(),
+            }),
+            name: "name".into(),
+        }
+    );
+}
+
+#[test]
 fn parses_list_as_function_call_argument_and_for_iterable() {
     let ParsedInput::Pipeline(pipeline) = parse(r#"print_all(["one", "two", "three"])"#).unwrap()
     else {

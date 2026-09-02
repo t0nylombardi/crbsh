@@ -372,6 +372,9 @@ fn raw_builtin_arg(argument: &Expression) -> Result<String, ShellError> {
             raw_builtin_arg(right)?
         ),
         Expression::Call { name, .. } => name.clone(),
+        Expression::Field { target, name } => {
+            format!("{}.{}", raw_builtin_arg(target)?, name)
+        }
         Expression::List(_)
         | Expression::Index { .. }
         | Expression::Match { .. }
@@ -677,6 +680,10 @@ pub(crate) fn evaluate_expression(
             let target = evaluate_expression(shell, target)?;
             let index = evaluate_expression(shell, index)?;
             shell::evaluate_index(target, index).map_err(Into::into)
+        }
+        parser::Expression::Field { target, name } => {
+            let target = evaluate_expression(shell, target)?;
+            shell::evaluate_field(target, name).map_err(Into::into)
         }
         parser::Expression::Match { value, arms } => {
             let value = evaluate_expression(shell, value)?;

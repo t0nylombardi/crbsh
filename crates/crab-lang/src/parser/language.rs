@@ -17,6 +17,10 @@ pub enum Expression {
         target: Box<Expression>,
         index: Box<Expression>,
     },
+    Field {
+        target: Box<Expression>,
+        name: String,
+    },
     Match {
         value: Box<Expression>,
         arms: Vec<MatchExpressionArm>,

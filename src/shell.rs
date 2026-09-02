@@ -40,6 +40,7 @@ pub enum ShellError {
         len: usize,
     },
     NegativeIndex(i64),
+    MissingRecordField(String),
     NonExhaustiveMatch,
 }
 
@@ -238,6 +239,7 @@ impl Shell {
             Expression::Index { target, index } => {
                 evaluate_index(self.evaluate(target)?, self.evaluate(index)?)
             }
+            Expression::Field { target, name } => evaluate_field(self.evaluate(target)?, name),
             Expression::Match { value, arms } => {
                 let value = self.evaluate(value)?;
                 let arm = arms
@@ -266,6 +268,15 @@ impl Shell {
                 .variable_value(name)
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| name.clone())),
+            Expression::Field { .. } => {
+                let Some((root, path)) = field_path(expression) else {
+                    return self.evaluate(expression).map(|value| value.to_string());
+                };
+                if self.runtime.variable_value(root).is_none() {
+                    return Ok(path);
+                }
+                self.evaluate(expression).map(|value| value.to_string())
+            }
             _ => self.evaluate(expression).map(|value| value.to_string()),
         }
     }
@@ -290,6 +301,17 @@ impl Shell {
             .get(name)
             .cloned()
             .or_else(|| std::env::var(name).ok())
+    }
+}
+
+fn field_path(expression: &Expression) -> Option<(&str, String)> {
+    match expression {
+        Expression::Identifier(name) => Some((name, name.clone())),
+        Expression::Field { target, name } => {
+            let (root, target) = field_path(target)?;
+            Some((root, format!("{target}.{name}")))
+        }
+        _ => None,
     }
 }
 
@@ -363,6 +385,7 @@ impl fmt::Display for ShellError {
             Self::NegativeIndex(index) => {
                 write!(formatter, "list index cannot be negative: {index}")
             }
+            Self::MissingRecordField(name) => write!(formatter, "record has no field '{name}'"),
             Self::NonExhaustiveMatch => write!(formatter, "non-exhaustive match expression"),
         }
     }
@@ -503,6 +526,18 @@ pub fn evaluate_index(target: Value, index: Value) -> Result<Value, ShellError> 
         })
 }
 
+pub fn evaluate_field(target: Value, name: &str) -> Result<Value, ShellError> {
+    let Value::Record(mut fields) = target else {
+        return Err(ShellError::TypeMismatch {
+            expected: TypeName::Record(None),
+            found: target.type_name(),
+        });
+    };
+    fields
+        .remove(name)
+        .ok_or_else(|| ShellError::MissingRecordField(name.into()))
+}
+
 pub fn evaluate_len(target: Value) -> Result<Value, ShellError> {
     let Value::List(values) = target else {
         return Err(ShellError::TypeMismatch {
@@ -516,6 +551,8 @@ pub fn evaluate_len(target: Value) -> Result<Value, ShellError> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use crate::parser::{BinaryOperator, Expression};
     use crate::runtime::{TypeName, Value};
 
@@ -541,6 +578,36 @@ mod tests {
                 "numbers".into()
             )))),
             Ok(Value::Int(2))
+        );
+    }
+
+    #[test]
+    fn evaluates_record_fields_and_preserves_dotted_command_arguments() {
+        let mut shell = Shell::new();
+        shell
+            .declare_variable(
+                "user",
+                None,
+                Value::Record(BTreeMap::from([(
+                    "name".into(),
+                    Value::String("Tony".into()),
+                )])),
+            )
+            .unwrap();
+
+        assert_eq!(
+            shell.evaluate(&Expression::Field {
+                target: Box::new(Expression::Identifier("user".into())),
+                name: "name".into(),
+            }),
+            Ok(Value::String("Tony".into()))
+        );
+        assert_eq!(
+            shell.resolve_argument(&Expression::Field {
+                target: Box::new(Expression::Identifier("archive".into())),
+                name: "tar".into(),
+            }),
+            Ok("archive.tar".into())
         );
     }
 

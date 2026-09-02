@@ -376,6 +376,7 @@ impl TypeChecker {
             Expression::Call { name, args } => self.infer_call(name, args),
             Expression::List(values) => self.infer_list(values),
             Expression::Index { target, index } => self.infer_index(target, index),
+            Expression::Field { target, name } => self.infer_field(target, name),
             Expression::Match { value, arms } => self.infer_match(value, arms),
             Expression::Len(target) => self.infer_len(target),
             Expression::Binary {
@@ -416,6 +417,28 @@ impl TypeChecker {
                 self.diagnostics.push(TypeDiagnostic::mismatch(
                     TypeDiagnosticKind::IndexTarget,
                     TypeName::List(None),
+                    found,
+                ));
+                None
+            }
+            None => None,
+        }
+    }
+
+    fn infer_field(&mut self, target: &Expression, name: &str) -> Option<TypeName> {
+        match self.infer(target) {
+            Some(TypeName::Record(Some(fields))) => fields.get(name).cloned().or_else(|| {
+                self.diagnostics
+                    .push(TypeDiagnostic::new(TypeDiagnosticKind::MissingRecordField(
+                        name.into(),
+                    )));
+                None
+            }),
+            Some(TypeName::Record(None)) => None,
+            Some(found) => {
+                self.diagnostics.push(TypeDiagnostic::mismatch(
+                    TypeDiagnosticKind::FieldTarget,
+                    TypeName::Record(None),
                     found,
                 ));
                 None
@@ -638,8 +661,11 @@ fn statement_guarantees_return(statement: &ParsedInput) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
-    use crate::parser::parse;
+    use crate::parser::{Expression, parse};
+    use crate::runtime::Value;
 
     fn parsed(source: &str) -> ParsedInput {
         parse(source).unwrap()
@@ -687,6 +713,101 @@ mod tests {
         ];
 
         assert_eq!(TypeChecker::check(&program), Ok(()));
+    }
+
+    #[test]
+    fn infers_list_literal_element_types() {
+        let expression = Expression::List(vec![Value::Int(1).into(), Value::Int(2).into()]);
+
+        assert_eq!(
+            TypeChecker::new().infer_expression(&expression),
+            Ok(TypeName::List(Some(Box::new(TypeName::Int))))
+        );
+    }
+
+    #[test]
+    fn rejects_heterogeneous_list_literals() {
+        let program = [parsed("let values = [1, \"two\"]")];
+
+        let diagnostics = TypeChecker::check(&program).unwrap_err();
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == TypeDiagnosticKind::ListElement
+                && diagnostic.expected == Some(TypeName::Int)
+                && diagnostic.found == Some(TypeName::String)
+        }));
+    }
+
+    #[test]
+    fn uses_annotations_to_type_empty_lists() {
+        let program = [
+            parsed("let values: list<int> = []"),
+            parsed("let first: int = values[0]"),
+        ];
+
+        assert_eq!(TypeChecker::check(&program), Ok(()));
+    }
+
+    #[test]
+    fn checks_index_types_and_targets() {
+        let program = [
+            parsed("let values = [1, 2]"),
+            parsed("let bad_index = values[\"zero\"]"),
+            parsed("let bad_target = true[0]"),
+        ];
+
+        let diagnostics = TypeChecker::check(&program).unwrap_err();
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == TypeDiagnosticKind::Index
+                && diagnostic.expected == Some(TypeName::Int)
+                && diagnostic.found == Some(TypeName::String)
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == TypeDiagnosticKind::IndexTarget
+                && diagnostic.found == Some(TypeName::Bool)
+        }));
+    }
+
+    #[test]
+    fn tracks_record_field_types() {
+        let record = Value::Record(BTreeMap::from([
+            ("active".into(), Value::Bool(true)),
+            ("name".into(), Value::String("Tony".into())),
+        ]));
+        let program = [
+            ParsedInput::Let {
+                name: "user".into(),
+                type_annotation: None,
+                value: record.into(),
+            },
+            parsed("let name: string = user.name"),
+            parsed("let active: bool = user.active"),
+        ];
+
+        assert_eq!(TypeChecker::check(&program), Ok(()));
+    }
+
+    #[test]
+    fn reports_missing_record_fields() {
+        let record = Value::Record(BTreeMap::from([(
+            "name".into(),
+            Value::String("Tony".into()),
+        )]));
+        let program = [
+            ParsedInput::Let {
+                name: "user".into(),
+                type_annotation: None,
+                value: record.into(),
+            },
+            parsed("let missing = user.email"),
+        ];
+
+        let diagnostics = TypeChecker::check(&program).unwrap_err();
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == TypeDiagnosticKind::MissingRecordField("email".into())
+        }));
     }
 
     #[test]
