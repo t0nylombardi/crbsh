@@ -85,6 +85,12 @@ expression types, applies operator rules, and returns diagnostics containing
 expected and found types when both are known. `TypeContext` provides the
 lexical type scopes used by the checker.
 
+Function signatures are collected before bodies are checked, so forward and
+recursive calls can be validated. The checker verifies typed parameters at
+call sites and inside function bodies, enforces declared return types, and
+rejects value-returning functions that can fall through. Nested function
+signatures follow lexical block scope and do not escape their defining scope.
+
 This is currently a library interface, not an execution gate in `crbsh`.
 Ordinary Unix command arguments remain host syntax because a bare command word
 and a language identifier currently share one AST representation. Function

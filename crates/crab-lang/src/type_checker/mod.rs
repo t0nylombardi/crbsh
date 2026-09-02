@@ -22,9 +22,15 @@ struct FunctionType {
 pub struct TypeChecker {
     context: TypeContext,
     unknowns: Vec<HashSet<String>>,
-    functions: HashMap<String, FunctionType>,
+    function_scopes: Vec<HashMap<String, FunctionType>>,
     diagnostics: Vec<TypeDiagnostic>,
-    expected_return: Option<TypeName>,
+    current_function: Option<FunctionContext>,
+}
+
+#[derive(Debug, Clone)]
+struct FunctionContext {
+    name: String,
+    return_type: Option<TypeName>,
 }
 
 impl Default for TypeChecker {
@@ -39,9 +45,9 @@ impl TypeChecker {
         Self {
             context: TypeContext::new(),
             unknowns: vec![HashSet::new()],
-            functions: HashMap::new(),
+            function_scopes: vec![HashMap::new()],
             diagnostics: Vec::new(),
-            expected_return: None,
+            current_function: None,
         }
     }
 
@@ -61,7 +67,6 @@ impl TypeChecker {
     /// Checks a complete sequence of parsed inputs and returns every safe diagnostic.
     pub fn check(program: &[ParsedInput]) -> Result<(), Vec<TypeDiagnostic>> {
         let mut checker = Self::new();
-        checker.register_functions(program);
         checker.check_statements(program);
 
         if checker.diagnostics.is_empty() {
@@ -93,22 +98,26 @@ impl TypeChecker {
     fn register_functions(&mut self, statements: &[ParsedInput]) {
         for statement in statements {
             if let ParsedInput::FunctionDefinition { name, definition } = statement {
-                self.functions.insert(
-                    name.clone(),
-                    FunctionType {
-                        params: definition
-                            .params
-                            .iter()
-                            .map(|param| param.type_annotation.clone())
-                            .collect(),
-                        return_type: definition.return_type.clone(),
-                    },
-                );
+                self.function_scopes
+                    .last_mut()
+                    .expect("checker always has a function scope")
+                    .insert(
+                        name.clone(),
+                        FunctionType {
+                            params: definition
+                                .params
+                                .iter()
+                                .map(|param| param.type_annotation.clone())
+                                .collect(),
+                            return_type: definition.return_type.clone(),
+                        },
+                    );
             }
         }
     }
 
     fn check_statements(&mut self, statements: &[ParsedInput]) {
+        self.register_functions(statements);
         for statement in statements {
             self.check_statement(statement);
         }
@@ -158,7 +167,9 @@ impl TypeChecker {
                 iterable,
                 body,
             } => self.check_for(name, iterable, body),
-            ParsedInput::FunctionDefinition { definition, .. } => self.check_function(definition),
+            ParsedInput::FunctionDefinition { name, definition } => {
+                self.check_function(name, definition)
+            }
             ParsedInput::Pipeline(pipeline) | ParsedInput::BackgroundPipeline { pipeline, .. } => {
                 self.check_pipeline(pipeline)
             }
@@ -222,31 +233,37 @@ impl TypeChecker {
     }
 
     fn check_return(&mut self, value: Option<&Expression>) {
-        match (self.expected_return.clone(), value) {
-            (Some(expected), Some(value)) => {
+        match (self.current_function.clone(), value) {
+            (
+                Some(FunctionContext {
+                    return_type: Some(expected),
+                    ..
+                }),
+                Some(value),
+            ) => {
                 self.expect(
                     value,
                     expected,
                     TypeDiagnosticKind::Declaration("return".into()),
                 );
             }
-            (Some(_), None) => {
+            (Some(function), None) if function.return_type.is_some() => {
                 self.diagnostics
                     .push(TypeDiagnostic::new(TypeDiagnosticKind::MissingReturnValue(
-                        "function".into(),
+                        function.name,
                     )))
             }
-            (None, Some(value)) => {
+            (Some(_), Some(value)) => {
                 self.infer(value);
                 self.diagnostics.push(TypeDiagnostic::new(
                     TypeDiagnosticKind::UnexpectedReturnValue,
                 ));
             }
-            (None, None) => {}
+            (Some(_), None) | (None, _) => {}
         }
     }
 
-    fn check_function(&mut self, definition: &FunctionDefinition) {
+    fn check_function(&mut self, name: &str, definition: &FunctionDefinition) {
         let function_context = self.context.function_context();
         let caller_context = std::mem::replace(&mut self.context, function_context);
         let function_unknowns = vec![
@@ -254,9 +271,11 @@ impl TypeChecker {
             HashSet::new(),
         ];
         let caller_unknowns = std::mem::replace(&mut self.unknowns, function_unknowns);
-        let caller_return = self
-            .expected_return
-            .replace_with(definition.return_type.clone());
+        let caller_function = self.current_function.replace(FunctionContext {
+            name: name.into(),
+            return_type: definition.return_type.clone(),
+        });
+        self.function_scopes.push(HashMap::new());
 
         for param in &definition.params {
             if let Some(type_name) = &param.type_annotation {
@@ -275,10 +294,17 @@ impl TypeChecker {
             }
         }
         self.check_statements(&definition.body);
+        if definition.return_type.is_some() && !statements_guarantee_return(&definition.body) {
+            self.diagnostics
+                .push(TypeDiagnostic::new(TypeDiagnosticKind::MissingReturnValue(
+                    name.into(),
+                )));
+        }
 
+        self.function_scopes.pop();
         self.context = caller_context;
         self.unknowns = caller_unknowns;
-        self.expected_return = caller_return;
+        self.current_function = caller_function;
     }
 
     fn check_for(&mut self, name: &str, iterable: &Iterable, body: &[ParsedInput]) {
@@ -319,14 +345,16 @@ impl TypeChecker {
     fn check_block(&mut self, statements: &[ParsedInput]) {
         self.context.push_scope();
         self.unknowns.push(HashSet::new());
+        self.function_scopes.push(HashMap::new());
         self.check_statements(statements);
+        self.function_scopes.pop();
         self.unknowns.pop();
         self.context.pop_scope();
     }
 
     fn check_pipeline(&mut self, pipeline: &Pipeline) {
         for command in &pipeline.commands {
-            if let Some(function) = self.functions.get(&command.name).cloned() {
+            if let Some(function) = self.resolve_function(&command.name).cloned() {
                 self.check_call(&command.name, &command.args, &function);
             }
         }
@@ -509,7 +537,7 @@ impl TypeChecker {
     }
 
     fn infer_call(&mut self, name: &str, args: &[Expression]) -> Option<TypeName> {
-        let Some(function) = self.functions.get(name).cloned() else {
+        let Some(function) = self.resolve_function(name).cloned() else {
             self.diagnostics
                 .push(TypeDiagnostic::new(TypeDiagnosticKind::UnknownFunction(
                     name.into(),
@@ -536,16 +564,19 @@ impl TypeChecker {
                 }));
         }
 
-        for (index, (argument, expected)) in args.iter().zip(&function.params).enumerate() {
-            if let Some(expected) = expected {
-                self.expect(
+        for (index, argument) in args.iter().enumerate() {
+            match function.params.get(index).and_then(Option::as_ref) {
+                Some(expected) => self.expect(
                     argument,
                     expected.clone(),
                     TypeDiagnosticKind::FunctionArgument {
                         function: name.into(),
                         index,
                     },
-                );
+                ),
+                None => {
+                    self.infer(argument);
+                }
             }
         }
     }
@@ -569,15 +600,39 @@ impl TypeChecker {
     fn is_unknown(&self, name: &str) -> bool {
         self.unknowns.iter().rev().any(|scope| scope.contains(name))
     }
+
+    fn resolve_function(&self, name: &str) -> Option<&FunctionType> {
+        self.function_scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name))
+    }
 }
 
-trait ReplaceOption<T> {
-    fn replace_with(&mut self, value: Option<T>) -> Option<T>;
+fn statements_guarantee_return(statements: &[ParsedInput]) -> bool {
+    statements.iter().any(statement_guarantees_return)
 }
 
-impl<T> ReplaceOption<T> for Option<T> {
-    fn replace_with(&mut self, value: Option<T>) -> Option<T> {
-        std::mem::replace(self, value)
+fn statement_guarantees_return(statement: &ParsedInput) -> bool {
+    match statement {
+        ParsedInput::Return { .. } => true,
+        ParsedInput::If {
+            branches,
+            else_body: Some(else_body),
+        } => {
+            branches
+                .iter()
+                .all(|branch| statements_guarantee_return(&branch.body))
+                && statements_guarantee_return(else_body)
+        }
+        ParsedInput::Match { arms, .. } => {
+            arms.iter()
+                .any(|arm| matches!(arm.pattern, MatchPattern::Wildcard))
+                && arms
+                    .iter()
+                    .all(|arm| statement_guarantees_return(&arm.body))
+        }
+        _ => false,
     }
 }
 
@@ -696,6 +751,135 @@ mod tests {
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].expected, Some(TypeName::Int));
         assert_eq!(diagnostics[0].found, Some(TypeName::String));
+    }
+
+    #[test]
+    fn collects_function_signatures_before_checking_calls() {
+        let program = [
+            parsed("let total: int = add_one(2)"),
+            parsed("fn add_one(value: int) -> int {\n    return value + 1\n}"),
+        ];
+
+        assert_eq!(TypeChecker::check(&program), Ok(()));
+    }
+
+    #[test]
+    fn checks_parameter_types_inside_function_bodies() {
+        let program = [parsed(
+            "fn invalid(value: string) -> int {\n    return value + 1\n}",
+        )];
+
+        let diagnostics = TypeChecker::check(&program).unwrap_err();
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == TypeDiagnosticKind::BinaryOperands("+".into())
+                && diagnostic.expected == Some(TypeName::Int)
+                && diagnostic.found == Some(TypeName::String)
+        }));
+    }
+
+    #[test]
+    fn checks_function_call_arity() {
+        let program = [
+            parsed("fn add(left: int, right: int) -> int {\n    return left + right\n}"),
+            parsed("let total = add(1)"),
+        ];
+
+        let diagnostics = TypeChecker::check(&program).unwrap_err();
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind
+                == TypeDiagnosticKind::ArgumentCount {
+                    function: "add".into(),
+                    expected: 2,
+                    found: 1,
+                }
+        }));
+    }
+
+    #[test]
+    fn checks_extra_function_argument_expressions() {
+        let program = [
+            parsed("fn identity(value: int) -> int {\n    return value\n}"),
+            parsed("let result = identity(1, missing)"),
+        ];
+
+        let diagnostics = TypeChecker::check(&program).unwrap_err();
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == TypeDiagnosticKind::UndefinedVariable("missing".into())
+        }));
+    }
+
+    #[test]
+    fn checks_return_expressions_against_the_declared_type() {
+        let program = [parsed(
+            "fn invalid(value: int) -> int {\n    return \"wrong\"\n}",
+        )];
+
+        let diagnostics = TypeChecker::check(&program).unwrap_err();
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == TypeDiagnosticKind::Declaration("return".into())
+                && diagnostic.expected == Some(TypeName::Int)
+                && diagnostic.found == Some(TypeName::String)
+        }));
+    }
+
+    #[test]
+    fn rejects_typed_functions_that_can_fall_through() {
+        let program = [parsed(
+            "fn classify(value: int) -> string {\n    if value == 0 {\n        return \"zero\"\n    }\n}",
+        )];
+
+        let diagnostics = TypeChecker::check(&program).unwrap_err();
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == TypeDiagnosticKind::MissingReturnValue("classify".into())
+        }));
+    }
+
+    #[test]
+    fn accepts_typed_functions_when_every_branch_returns() {
+        let program = [parsed(
+            "fn classify(value: int) -> string {\n    if value == 0 {\n        return \"zero\"\n    } else {\n        return \"other\"\n    }\n}",
+        )];
+
+        assert_eq!(TypeChecker::check(&program), Ok(()));
+    }
+
+    #[test]
+    fn checks_recursive_function_calls() {
+        let program = [parsed(
+            "fn factorial(value: int) -> int {\n    if value == 0 {\n        return 1\n    } else {\n        return value * factorial(value - 1)\n    }\n}",
+        )];
+
+        assert_eq!(TypeChecker::check(&program), Ok(()));
+    }
+
+    #[test]
+    fn collects_nested_function_signatures_in_their_lexical_scope() {
+        let program = [parsed(
+            "fn outer(value: int) -> int {\n    let result = helper(value)\n    fn helper(input: int) -> int {\n        return input + 1\n    }\n    return result\n}",
+        )];
+
+        assert_eq!(TypeChecker::check(&program), Ok(()));
+    }
+
+    #[test]
+    fn nested_function_signatures_do_not_escape_their_scope() {
+        let program = [
+            parsed(
+                "fn outer(value: int) -> int {\n    fn helper(input: int) -> int {\n        return input + 1\n    }\n    return helper(value)\n}",
+            ),
+            parsed("let leaked = helper(1)"),
+        ];
+
+        let diagnostics = TypeChecker::check(&program).unwrap_err();
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == TypeDiagnosticKind::UnknownFunction("helper".into())
+        }));
     }
 
     #[test]
