@@ -77,6 +77,19 @@ Supported arithmetic and comparison operators are:
 Arithmetic operates on integers. Integer overflow and division by zero produce
 errors instead of panics. Equality requires matching value types.
 
+### Static Type Checking
+
+`crab-lang::type_checker` can traverse parsed inputs without evaluating them.
+Its `TypeChecker` validates lexical declarations and assignments, infers
+expression types, applies operator rules, and returns diagnostics containing
+expected and found types when both are known. `TypeContext` provides the
+lexical type scopes used by the checker.
+
+This is currently a library interface, not an execution gate in `crbsh`.
+Ordinary Unix command arguments remain host syntax because a bare command word
+and a language identifier currently share one AST representation. Function
+calls in command position are checked when their signatures are known.
+
 `status` evaluates to the exit code of the most recently executed command or
 pipeline. Environment values use the `env.NAME` namespace:
 
