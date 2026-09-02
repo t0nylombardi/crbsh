@@ -2,7 +2,8 @@
 
 `crbsh` is a modern experimental Unix shell written in Rust. It executes
 traditional programs directly through `$PATH`, owns its process pipelines, and
-adds typed values and structured data without giving up Unix interoperability.
+adds typed values, whole-script static checking, and structured data without
+giving up Unix interoperability.
 
 It is not a Bash clone and does not pass user input through Bash, Zsh, Fish, or
 `/bin/sh`.
@@ -167,10 +168,25 @@ Other file extensions are rejected. Scripts can combine Unix commands with
 typed variables, functions, conditions, loops, matching, and structured
 pipelines. See the [Crab language guide](docs/language.md).
 
-Before executing a script, `crbsh` parses and type checks the complete file.
-Syntax and type diagnostics include source locations, and multiple independent
-errors are reported together. A rejected script performs no command, file, or
-environment side effects.
+### Reject invalid files before side effects
+
+Before executing a `.crb` script or `~/.crbshrc`, `crbsh` parses and type checks
+the complete file. Invalid files are rejected before any command runs or any
+file, shell-state, or environment side effect occurs.
+
+The checker reports multiple independent diagnostics together with source
+locations. It validates:
+
+- declarations, assignments, operators, indexes, and known record fields;
+- function arguments, return values, recursion, and fallthrough paths;
+- boolean conditions, loop iterables, ranges, and match compatibility;
+- shell-provided types for `status`, environment values, and native structured
+  stages.
+
+Ordinary Unix commands remain dynamically bounded: `crbsh` does not pretend to
+know the private argument or output contracts of arbitrary external programs.
+Interactive REPL input is still parsed and evaluated one complete input at a
+time rather than preflight-checking a future session.
 
 ### Mix structured values with Unix tools
 
@@ -258,11 +274,12 @@ The repository contains two Cargo packages:
 crbsh/
 ├── Cargo.toml
 ├── crates/
-│   └── crab-lang/        # lexer, parser, AST, values, scopes, functions, streams
+│   └── crab-lang/        # parser, AST, types, static checker, runtime values
 ├── docs/
 │   └── language.md       # language reference and examples
 └── src/
     ├── main.rs           # REPL, scripts, startup configuration
+    ├── static_check.rs   # whole-file validation before execution
     ├── shell.rs          # persistent shell and host state
     ├── runtime/          # host evaluator
     ├── execution/        # processes, pipelines, adapters, jobs, redirection

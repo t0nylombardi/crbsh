@@ -115,10 +115,16 @@ Commands without a supplied signature remain dynamically bounded Unix commands:
 their arguments are not treated as strict Crab expressions, and text crossing
 back into a native stage is typed as `string` items.
 
-This is currently a library interface, not an execution gate in `crbsh`.
+For `.crb` scripts and `~/.crbshrc`, `crbsh` parses and checks the complete file
+before execution. Independent diagnostics are aggregated with source locations,
+and a rejected file performs no command, file, shell-state, or environment side
+effects. Interactive REPL input is checked only through its existing per-input
+parse and runtime validation path.
+
 Ordinary Unix command arguments remain host syntax because a bare command word
-and a language identifier currently share one AST representation. Function
-calls in command position are checked when their signatures are known.
+and a language identifier currently share one AST representation. External
+commands without a host-provided signature remain dynamically bounded.
+Function calls in command position are checked when their signatures are known.
 
 `status` evaluates to the exit code of the most recently executed command or
 pipeline. Environment values use the `env.NAME` namespace:
