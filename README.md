@@ -167,6 +167,11 @@ Other file extensions are rejected. Scripts can combine Unix commands with
 typed variables, functions, conditions, loops, matching, and structured
 pipelines. See the [Crab language guide](docs/language.md).
 
+Before executing a script, `crbsh` parses and type checks the complete file.
+Syntax and type diagnostics include source locations, and multiple independent
+errors are reported together. A rejected script performs no command, file, or
+environment side effects.
+
 ### Mix structured values with Unix tools
 
 Native stages exchange typed values, while `crbsh` adapts data at Unix process

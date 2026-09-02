@@ -15,7 +15,7 @@ use super::pipeline::status_exit_code;
 #[derive(Debug, Default)]
 pub(crate) struct ShellHostTypes;
 
-const SHELL_HOST_TYPES: ShellHostTypes = ShellHostTypes;
+pub(crate) const SHELL_HOST_TYPES: ShellHostTypes = ShellHostTypes;
 
 impl HostTypeProvider for ShellHostTypes {
     fn symbol_type(&self, symbol: HostSymbol<'_>) -> Option<TypeName> {

@@ -5,6 +5,7 @@ mod parser;
 mod prompt;
 mod runtime;
 mod shell;
+mod static_check;
 
 use std::fs;
 use std::io::{self, BufRead, Write};
@@ -143,18 +144,21 @@ fn run_config_file(shell: &mut Shell, path: &Path) -> Option<i32> {
 }
 
 fn execute_source(shell: &mut Shell, source: &str) -> i32 {
-    let statements = collect_source_statements(source);
-
-    for statement in statements {
-        let parsed_input = match parser::parse(&statement) {
-            Ok(parsed_input) => parsed_input,
-            Err(err) => {
-                eprintln!("crbsh: {}", parser::format_error(&err));
-                return 2;
+    let program = match static_check::check_source(source) {
+        Ok(program) => program,
+        Err(diagnostics) => {
+            for diagnostic in diagnostics {
+                match diagnostic.location() {
+                    Some(location) => eprintln!("crbsh: {location}: {diagnostic}"),
+                    None => eprintln!("crbsh: {diagnostic}"),
+                }
             }
-        };
+            return 2;
+        }
+    };
 
-        let flow = execute_input(shell, parsed_input);
+    for located in program {
+        let flow = execute_input(shell, located.input);
         if let Some(code) = handle_control_flow(shell, flow, false) {
             return code;
         }
@@ -198,32 +202,6 @@ fn handle_control_flow(shell: &mut Shell, flow: ControlFlow, interactive: bool) 
     } else {
         None
     }
-}
-
-fn collect_source_statements(source: &str) -> Vec<String> {
-    let mut statements = Vec::new();
-    let mut current = String::new();
-
-    for line in source.lines() {
-        if current.is_empty() && line.trim().is_empty() {
-            continue;
-        }
-
-        if !current.is_empty() {
-            current.push('\n');
-        }
-        current.push_str(line);
-
-        if brace_balance(&current) <= 0 && !current.trim().is_empty() {
-            statements.push(std::mem::take(&mut current));
-        }
-    }
-
-    if !current.trim().is_empty() {
-        statements.push(current);
-    }
-
-    statements
 }
 
 fn read_input() -> Result<Option<String>, ()> {
@@ -890,26 +868,6 @@ fn find_positive(x: int) -> int {
     }
 
     #[test]
-    fn source_file_statements_preserve_block_units() {
-        let statements = collect_source_statements(
-            r#"
-let x = 1
-
-fn add(a: int, b: int) -> int {
-    return a + b
-}
-
-let total = add(2, 3)
-"#,
-        );
-
-        assert_eq!(statements.len(), 3);
-        assert_eq!(statements[0].trim(), "let x = 1");
-        assert!(statements[1].contains("fn add"));
-        assert_eq!(statements[2].trim(), "let total = add(2, 3)");
-    }
-
-    #[test]
     fn runs_crb_script_file_in_single_shell_state() {
         let path = temp_script_path("runs_crb_script_file_in_single_shell_state");
         fs::write(
@@ -934,6 +892,21 @@ let total = add(2, 3)
             shell.evaluate(&Expression::Identifier("total".into())),
             Ok(Value::Int(5))
         );
+    }
+
+    #[test]
+    fn rejects_invalid_complete_script_before_file_side_effects() {
+        let output = temp_script_path("static_check_side_effect").with_extension("txt");
+        let source = format!(
+            "print created > {}\nlet count: int = \"many\"\n",
+            output.display()
+        );
+        let mut shell = Shell::new();
+
+        let code = execute_source(&mut shell, &source);
+
+        assert_eq!(code, 2);
+        assert!(!output.exists());
     }
 
     #[test]

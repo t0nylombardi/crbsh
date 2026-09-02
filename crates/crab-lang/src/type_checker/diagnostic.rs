@@ -1,5 +1,6 @@
 use std::fmt;
 
+use crate::parser::SourceLocation;
 use crate::runtime::TypeName;
 
 /// A static type error found without evaluating the program.
@@ -8,6 +9,7 @@ pub struct TypeDiagnostic {
     pub kind: TypeDiagnosticKind,
     pub expected: Option<TypeName>,
     pub found: Option<TypeName>,
+    location: Option<Box<SourceLocation>>,
 }
 
 impl TypeDiagnostic {
@@ -16,6 +18,7 @@ impl TypeDiagnostic {
             kind,
             expected: None,
             found: None,
+            location: None,
         }
     }
 
@@ -24,7 +27,17 @@ impl TypeDiagnostic {
             kind,
             expected: Some(expected),
             found: Some(found),
+            location: None,
         }
+    }
+
+    pub(crate) fn locate(&mut self, location: SourceLocation) {
+        self.location.get_or_insert_with(|| Box::new(location));
+    }
+
+    /// Returns the top-level source location associated with this diagnostic.
+    pub fn location(&self) -> Option<SourceLocation> {
+        self.location.as_deref().copied()
     }
 }
 

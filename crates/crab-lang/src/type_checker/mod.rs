@@ -9,7 +9,8 @@ pub use diagnostic::{TypeDiagnostic, TypeDiagnosticKind};
 pub use host::{HostSymbol, HostTypeProvider, LanguageHostTypes, NativeStageSignature};
 
 use crate::parser::{
-    BinaryOperator, Expression, FunctionDefinition, Iterable, MatchPattern, ParsedInput, Pipeline,
+    BinaryOperator, Expression, FunctionDefinition, Iterable, LocatedInput, MatchPattern,
+    ParsedInput, Pipeline,
 };
 use crate::runtime::TypeName;
 
@@ -82,6 +83,14 @@ impl TypeChecker<'static> {
     ) -> Result<(), Vec<TypeDiagnostic>> {
         TypeChecker::with_host(host).check_program(program)
     }
+
+    /// Checks located inputs and attaches their source locations to diagnostics.
+    pub fn check_located_with_host(
+        program: &[LocatedInput],
+        host: &dyn HostTypeProvider,
+    ) -> Result<(), Vec<TypeDiagnostic>> {
+        TypeChecker::with_host(host).check_located_program(program)
+    }
 }
 
 impl<'host> TypeChecker<'host> {
@@ -99,6 +108,31 @@ impl<'host> TypeChecker<'host> {
 
     fn check_program(&mut self, program: &[ParsedInput]) -> Result<(), Vec<TypeDiagnostic>> {
         self.check_statements(program);
+
+        if self.diagnostics.is_empty() {
+            Ok(())
+        } else {
+            Err(std::mem::take(&mut self.diagnostics))
+        }
+    }
+
+    fn check_located_program(
+        &mut self,
+        program: &[LocatedInput],
+    ) -> Result<(), Vec<TypeDiagnostic>> {
+        let statements = program
+            .iter()
+            .map(|located| located.input.clone())
+            .collect::<Vec<_>>();
+        self.register_functions(&statements);
+
+        for located in program {
+            let diagnostic_start = self.diagnostics.len();
+            self.check_statement(&located.input);
+            for diagnostic in &mut self.diagnostics[diagnostic_start..] {
+                diagnostic.locate(located.location);
+            }
+        }
 
         if self.diagnostics.is_empty() {
             Ok(())
