@@ -1,10 +1,12 @@
 mod context;
 mod diagnostic;
+mod host;
 
 use std::collections::{HashMap, HashSet};
 
 pub use context::{ContextError, TypeContext};
 pub use diagnostic::{TypeDiagnostic, TypeDiagnosticKind};
+pub use host::{HostSymbol, HostTypeProvider, LanguageHostTypes, NativeStageSignature};
 
 use crate::parser::{
     BinaryOperator, Expression, FunctionDefinition, Iterable, MatchPattern, ParsedInput, Pipeline,
@@ -18,9 +20,9 @@ struct FunctionType {
 }
 
 /// Traverses Crab AST nodes and reports type errors without evaluation.
-#[derive(Debug)]
-pub struct TypeChecker {
+pub struct TypeChecker<'host> {
     context: TypeContext,
+    host: &'host dyn HostTypeProvider,
     unknowns: Vec<HashSet<String>>,
     function_scopes: Vec<HashMap<String, FunctionType>>,
     diagnostics: Vec<TypeDiagnostic>,
@@ -33,17 +35,20 @@ struct FunctionContext {
     return_type: Option<TypeName>,
 }
 
-impl Default for TypeChecker {
+impl Default for TypeChecker<'static> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl TypeChecker {
+static LANGUAGE_HOST_TYPES: LanguageHostTypes = LanguageHostTypes;
+
+impl TypeChecker<'static> {
     /// Creates a checker with an empty global type context.
     pub fn new() -> Self {
         Self {
             context: TypeContext::new(),
+            host: &LANGUAGE_HOST_TYPES,
             unknowns: vec![HashSet::new()],
             function_scopes: vec![HashMap::new()],
             diagnostics: Vec::new(),
@@ -67,12 +72,38 @@ impl TypeChecker {
     /// Checks a complete sequence of parsed inputs and returns every safe diagnostic.
     pub fn check(program: &[ParsedInput]) -> Result<(), Vec<TypeDiagnostic>> {
         let mut checker = Self::new();
-        checker.check_statements(program);
+        checker.check_program(program)
+    }
 
-        if checker.diagnostics.is_empty() {
+    /// Checks a program using host-owned symbol and native-stage types.
+    pub fn check_with_host(
+        program: &[ParsedInput],
+        host: &dyn HostTypeProvider,
+    ) -> Result<(), Vec<TypeDiagnostic>> {
+        TypeChecker::with_host(host).check_program(program)
+    }
+}
+
+impl<'host> TypeChecker<'host> {
+    /// Creates a checker using types supplied by the shell host.
+    pub fn with_host(host: &'host dyn HostTypeProvider) -> Self {
+        Self {
+            context: TypeContext::new(),
+            host,
+            unknowns: vec![HashSet::new()],
+            function_scopes: vec![HashMap::new()],
+            diagnostics: Vec::new(),
+            current_function: None,
+        }
+    }
+
+    fn check_program(&mut self, program: &[ParsedInput]) -> Result<(), Vec<TypeDiagnostic>> {
+        self.check_statements(program);
+
+        if self.diagnostics.is_empty() {
             Ok(())
         } else {
-            Err(checker.diagnostics)
+            Err(std::mem::take(&mut self.diagnostics))
         }
     }
 
@@ -352,10 +383,138 @@ impl TypeChecker {
     }
 
     fn check_pipeline(&mut self, pipeline: &Pipeline) {
+        let mut stream_type = None;
         for command in &pipeline.commands {
             if let Some(function) = self.resolve_function(&command.name).cloned() {
                 self.check_call(&command.name, &command.args, &function);
+                continue;
             }
+
+            if let Some(signature) = self.host.native_stage(&command.name) {
+                stream_type = self.check_native_stage(command, signature, stream_type);
+            } else {
+                // External commands remain dynamically bounded. Their arguments
+                // are host syntax, while output crossing into Crab is text.
+                stream_type = Some(TypeName::String);
+            }
+        }
+    }
+
+    fn check_native_stage(
+        &mut self,
+        command: &crate::parser::ParsedCommand,
+        signature: NativeStageSignature,
+        input: Option<TypeName>,
+    ) -> Option<TypeName> {
+        match signature {
+            NativeStageSignature::Values => {
+                self.expect_no_stage_input(&command.name, input.as_ref());
+                self.infer_stream_arguments(&command.args)
+            }
+            NativeStageSignature::Record => {
+                self.expect_no_stage_input(&command.name, input.as_ref());
+                self.infer_record_stage(&command.name, &command.args)
+            }
+            NativeStageSignature::Take => {
+                self.expect_stage_input(&command.name, input.as_ref());
+                self.expect_stage_arguments(&command.name, &command.args, &[TypeName::Int]);
+                input
+            }
+            NativeStageSignature::Count => {
+                self.expect_stage_input(&command.name, input.as_ref());
+                self.expect_stage_arguments(&command.name, &command.args, &[]);
+                Some(TypeName::Int)
+            }
+            NativeStageSignature::Collect => {
+                self.expect_stage_input(&command.name, input.as_ref());
+                self.expect_stage_arguments(&command.name, &command.args, &[]);
+                Some(TypeName::List(input.map(Box::new)))
+            }
+        }
+    }
+
+    fn infer_stream_arguments(&mut self, arguments: &[Expression]) -> Option<TypeName> {
+        let mut item_type = None;
+        for argument in arguments {
+            let found = match self.infer(argument) {
+                Some(TypeName::List(element)) => element.map(|element| *element),
+                other => other,
+            };
+            item_type = merge_stream_type(item_type, found);
+        }
+        item_type
+    }
+
+    fn infer_record_stage(&mut self, name: &str, arguments: &[Expression]) -> Option<TypeName> {
+        if !arguments.len().is_multiple_of(2) {
+            self.diagnostics.push(TypeDiagnostic::new(
+                TypeDiagnosticKind::StageArgumentCount {
+                    stage: name.into(),
+                    expected: arguments.len() + 1,
+                    found: arguments.len(),
+                },
+            ));
+            return Some(TypeName::Record(None));
+        }
+
+        let mut fields = std::collections::BTreeMap::new();
+        for pair in arguments.chunks_exact(2) {
+            let field = match &pair[0] {
+                Expression::Identifier(name)
+                | Expression::Literal(crate::runtime::Value::String(name)) => Some(name.clone()),
+                _ => None,
+            };
+            let value_type = self.infer(&pair[1]);
+            if let (Some(field), Some(value_type)) = (field, value_type) {
+                fields.insert(field, value_type);
+            }
+        }
+        Some(TypeName::Record(Some(fields)))
+    }
+
+    fn expect_stage_arguments(
+        &mut self,
+        name: &str,
+        arguments: &[Expression],
+        expected: &[TypeName],
+    ) {
+        if arguments.len() != expected.len() {
+            self.diagnostics.push(TypeDiagnostic::new(
+                TypeDiagnosticKind::StageArgumentCount {
+                    stage: name.into(),
+                    expected: expected.len(),
+                    found: arguments.len(),
+                },
+            ));
+        }
+        for (index, argument) in arguments.iter().enumerate() {
+            if let Some(expected) = expected.get(index) {
+                self.expect(
+                    argument,
+                    expected.clone(),
+                    TypeDiagnosticKind::StageArgument {
+                        stage: name.into(),
+                        index,
+                    },
+                );
+            }
+        }
+    }
+
+    fn expect_no_stage_input(&mut self, name: &str, input: Option<&TypeName>) {
+        if input.is_some() {
+            self.diagnostics.push(TypeDiagnostic::new(
+                TypeDiagnosticKind::UnexpectedStageInput(name.into()),
+            ));
+        }
+    }
+
+    fn expect_stage_input(&mut self, name: &str, input: Option<&TypeName>) {
+        if input.is_none() {
+            self.diagnostics
+                .push(TypeDiagnostic::new(TypeDiagnosticKind::MissingStageInput(
+                    name.into(),
+                )));
         }
     }
 
@@ -370,8 +529,10 @@ impl TypeChecker {
                 }
                 None
             }),
-            Expression::EnvironmentVariable(_) => Some(TypeName::String),
-            Expression::Status => Some(TypeName::Int),
+            Expression::EnvironmentVariable(name) => self
+                .host
+                .symbol_type(HostSymbol::Environment(name.as_str())),
+            Expression::Status => self.host.symbol_type(HostSymbol::Status),
             Expression::Call { name, args } => self.infer_call(name, args),
             Expression::List(values) => self.infer_list(values),
             Expression::Index { target, index } => self.infer_index(target, index),
@@ -633,6 +794,14 @@ impl TypeChecker {
 
 fn statements_guarantee_return(statements: &[ParsedInput]) -> bool {
     statements.iter().any(statement_guarantees_return)
+}
+
+fn merge_stream_type(current: Option<TypeName>, found: Option<TypeName>) -> Option<TypeName> {
+    match (current, found) {
+        (None, found) => found,
+        (Some(current), Some(found)) if current.accepts(&found) => Some(current),
+        _ => None,
+    }
 }
 
 fn statement_guarantees_return(statement: &ParsedInput) -> bool {
@@ -1078,6 +1247,79 @@ mod tests {
         ];
 
         assert_eq!(TypeChecker::check(&program), Ok(()));
+    }
+
+    #[test]
+    fn default_host_types_status_and_environment_as_int_and_string() {
+        let program = [
+            parsed("let code: int = status"),
+            parsed("let home: string = env.HOME"),
+        ];
+
+        assert_eq!(TypeChecker::check(&program), Ok(()));
+    }
+
+    #[derive(Debug)]
+    struct TestHostTypes;
+
+    impl HostTypeProvider for TestHostTypes {
+        fn symbol_type(&self, symbol: HostSymbol<'_>) -> Option<TypeName> {
+            match symbol {
+                HostSymbol::Status => Some(TypeName::Int),
+                HostSymbol::Environment(_) => Some(TypeName::String),
+            }
+        }
+
+        fn native_stage(&self, command: &str) -> Option<NativeStageSignature> {
+            match command {
+                "emit" => Some(NativeStageSignature::Values),
+                "limit" => Some(NativeStageSignature::Take),
+                "size" => Some(NativeStageSignature::Count),
+                "bundle" => Some(NativeStageSignature::Collect),
+                _ => None,
+            }
+        }
+    }
+
+    #[test]
+    fn checks_host_provided_native_stage_signatures() {
+        let host = TestHostTypes;
+        let program = [parsed("emit [1, 2] | limit \"two\" | bundle")];
+
+        let diagnostics = TypeChecker::check_with_host(&program, &host).unwrap_err();
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind
+                == TypeDiagnosticKind::StageArgument {
+                    stage: "limit".into(),
+                    index: 0,
+                }
+                && diagnostic.expected == Some(TypeName::Int)
+                && diagnostic.found == Some(TypeName::String)
+        }));
+    }
+
+    #[test]
+    fn reports_native_stage_stream_contract_errors() {
+        let host = TestHostTypes;
+        let program = [parsed("limit 1"), parsed("emit 1 | emit 2")];
+
+        let diagnostics = TypeChecker::check_with_host(&program, &host).unwrap_err();
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == TypeDiagnosticKind::MissingStageInput("limit".into())
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == TypeDiagnosticKind::UnexpectedStageInput("emit".into())
+        }));
+    }
+
+    #[test]
+    fn leaves_unknown_unix_commands_dynamically_bounded() {
+        let host = TestHostTypes;
+        let program = [parsed("printf missing | size")];
+
+        assert_eq!(TypeChecker::check_with_host(&program, &host), Ok(()));
     }
 
     #[test]

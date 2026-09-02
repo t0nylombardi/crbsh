@@ -59,6 +59,17 @@ pub enum TypeDiagnosticKind {
         function: String,
         index: usize,
     },
+    StageArgumentCount {
+        stage: String,
+        expected: usize,
+        found: usize,
+    },
+    StageArgument {
+        stage: String,
+        index: usize,
+    },
+    MissingStageInput(String),
+    UnexpectedStageInput(String),
     BinaryOperands(String),
 }
 
@@ -100,6 +111,20 @@ impl fmt::Display for TypeDiagnostic {
             }
             TypeDiagnosticKind::MissingRecordField(name) => {
                 write!(formatter, "record has no field '{name}'")
+            }
+            TypeDiagnosticKind::StageArgumentCount {
+                stage,
+                expected,
+                found,
+            } => write!(
+                formatter,
+                "stage '{stage}' expected {expected} arguments, found {found}"
+            ),
+            TypeDiagnosticKind::MissingStageInput(stage) => {
+                write!(formatter, "stage '{stage}' requires structured input")
+            }
+            TypeDiagnosticKind::UnexpectedStageInput(stage) => {
+                write!(formatter, "stage '{stage}' cannot consume structured input")
             }
             kind => write!(formatter, "type error in {kind:?}"),
         }

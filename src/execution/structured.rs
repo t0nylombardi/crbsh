@@ -5,18 +5,43 @@ use std::process::{Command, Stdio};
 use crate::parser::{Expression, ParsedCommand, Pipeline};
 use crate::runtime::{Value, ValueStream};
 use crate::shell::Shell;
+use crab_lang::runtime::TypeName;
+use crab_lang::type_checker::{HostSymbol, HostTypeProvider, NativeStageSignature};
 
 use super::ExecutionError;
 use super::command::resolved_args;
 use super::pipeline::status_exit_code;
 
-const STRUCTURED_COMMANDS: &[&str] = &["values", "record", "take", "count", "collect"];
+#[derive(Debug, Default)]
+pub(crate) struct ShellHostTypes;
+
+const SHELL_HOST_TYPES: ShellHostTypes = ShellHostTypes;
+
+impl HostTypeProvider for ShellHostTypes {
+    fn symbol_type(&self, symbol: HostSymbol<'_>) -> Option<TypeName> {
+        match symbol {
+            HostSymbol::Status => Some(TypeName::Int),
+            HostSymbol::Environment(_) => Some(TypeName::String),
+        }
+    }
+
+    fn native_stage(&self, command: &str) -> Option<NativeStageSignature> {
+        match command {
+            "values" => Some(NativeStageSignature::Values),
+            "record" => Some(NativeStageSignature::Record),
+            "take" => Some(NativeStageSignature::Take),
+            "count" => Some(NativeStageSignature::Count),
+            "collect" => Some(NativeStageSignature::Collect),
+            _ => None,
+        }
+    }
+}
 
 pub(super) fn contains_structured_command(pipeline: &Pipeline) -> bool {
     pipeline
         .commands
         .iter()
-        .any(|command| STRUCTURED_COMMANDS.contains(&command.name.as_str()))
+        .any(|command| is_structured_command(&command.name))
 }
 
 #[derive(Debug)]
@@ -54,7 +79,7 @@ pub(super) fn execute_structured_pipeline(
             ));
         }
 
-        if STRUCTURED_COMMANDS.contains(&command.name.as_str()) {
+        if is_structured_command(&command.name) {
             stream = Some(execute_stage(shell, index, command, stream)?);
             exit_code = 0;
         } else {
@@ -68,6 +93,10 @@ pub(super) fn execute_structured_pipeline(
         data: stream.unwrap_or_else(|| PipelineData::Structured(ValueStream::empty())),
         exit_code,
     })
+}
+
+fn is_structured_command(command: &str) -> bool {
+    SHELL_HOST_TYPES.native_stage(command).is_some()
 }
 
 fn execute_stage(
@@ -315,6 +344,7 @@ fn stage_error(
 #[cfg(test)]
 mod tests {
     use crate::parser;
+    use crab_lang::type_checker::{TypeChecker, TypeDiagnosticKind};
 
     use super::*;
 
@@ -346,6 +376,29 @@ mod tests {
             structured_values(execute_structured_pipeline(&shell, &pipeline).unwrap()),
             vec![Value::Int(1)]
         );
+    }
+
+    #[test]
+    fn shell_host_types_expose_native_stage_contracts() {
+        let program = [
+            parser::parse("values [1, 2] | take 1 | collect").unwrap(),
+            parser::parse("printf missing | count").unwrap(),
+        ];
+
+        assert_eq!(
+            TypeChecker::check_with_host(&program, &SHELL_HOST_TYPES),
+            Ok(())
+        );
+
+        let invalid = [parser::parse("values 1 | take true").unwrap()];
+        let diagnostics = TypeChecker::check_with_host(&invalid, &SHELL_HOST_TYPES).unwrap_err();
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind
+                == TypeDiagnosticKind::StageArgument {
+                    stage: "take".into(),
+                    index: 0,
+                }
+        }));
     }
 
     #[test]

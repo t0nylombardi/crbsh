@@ -107,6 +107,14 @@ binding, and filesystem globs provide strings. Match patterns must be compatible
 with the matched value, and every match-expression arm must produce a compatible
 result type. Unreachable and dead-code analysis is intentionally deferred.
 
+Host-backed types cross a narrow `HostTypeProvider` seam. The default language
+provider types `status` as `int` and `env.NAME` as `string`; the shell adapter
+also supplies signatures for `values`, `record`, `take`, `count`, and `collect`.
+Those signatures validate stage arguments and structured-input requirements.
+Commands without a supplied signature remain dynamically bounded Unix commands:
+their arguments are not treated as strict Crab expressions, and text crossing
+back into a native stage is typed as `string` items.
+
 This is currently a library interface, not an execution gate in `crbsh`.
 Ordinary Unix command arguments remain host syntax because a bare command word
 and a language identifier currently share one AST representation. Function
