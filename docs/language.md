@@ -232,6 +232,43 @@ Caller-local bindings are not visible inside the function and function locals
 do not leak after return. Nested calls and recursion are supported, with a
 recursion-depth limit.
 
+## Modules and Imports
+
+Every imported `.crb` file declares exactly one module namespace:
+
+```crb
+module math
+
+let base: int = 40
+
+fn add(value: int) -> int {
+    return base + value
+}
+```
+
+Import paths are quoted, must end in `.crb`, and resolve relative to the file
+containing the import:
+
+```crb
+import "lib/math.crb"
+
+let answer: int = math::add(2)
+let starting_value: int = math::base
+```
+
+Top-level variables and functions are exposed through the declared namespace;
+module-internal references to those symbols are rewritten to the same namespace.
+The `::` separator is distinct from `.` record-field access.
+
+The shell loads transitive imports before execution and type checks the combined
+program, including imported function arguments, returns, and values. The same
+canonical file is loaded once even when reached through multiple relative paths.
+Import cycles, duplicate namespaces, missing module declarations, unreadable
+files, and non-`.crb` paths are rejected before script side effects occur.
+
+Imports are currently a script feature. Interactive REPL inputs and
+`~/.crbshrc` continue to use the single-source execution path.
+
 ## Structured Pipelines
 
 Native structured stages exchange ordered values without converting them to

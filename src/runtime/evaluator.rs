@@ -41,6 +41,9 @@ pub(crate) enum ControlFlow {
 
 pub(crate) fn execute_input(shell: &mut Shell, parsed_input: ParsedInput) -> ControlFlow {
     match parsed_input {
+        ParsedInput::Module { .. } | ParsedInput::Import { .. } => {
+            return ControlFlow::Error("module directives require a .crb script".into());
+        }
         ParsedInput::FunctionDefinition { name, definition } => {
             shell.define_function(name, definition);
             shell.exit_code = 0;

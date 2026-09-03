@@ -84,6 +84,18 @@ pub fn parse(input: &str) -> Result<ParsedInput, ParseError> {
     }
 
     match tokens.as_slice() {
+        [Token::Word(keyword), Token::Word(name)] if keyword == "module" => {
+            if !is_valid_identifier(name) {
+                return Err(ParseError::InvalidModuleName(name.clone()));
+            }
+            return Ok(ParsedInput::Module { name: name.clone() });
+        }
+        [Token::Word(keyword), Token::StringLiteral(path)] if keyword == "import" => {
+            if path.is_empty() || !path.ends_with(".crb") {
+                return Err(ParseError::InvalidModulePath(path.clone()));
+            }
+            return Ok(ParsedInput::Import { path: path.clone() });
+        }
         [Token::Word(keyword), rest @ ..] if keyword == "let" => {
             return parse_let(rest);
         }
@@ -409,7 +421,9 @@ fn contains_value_return(statement: &ParsedInput) -> bool {
         ParsedInput::While { body, .. } | ParsedInput::For { body, .. } => {
             body.iter().any(contains_value_return)
         }
-        ParsedInput::FunctionDefinition { .. }
+        ParsedInput::Module { .. }
+        | ParsedInput::Import { .. }
+        | ParsedInput::FunctionDefinition { .. }
         | ParsedInput::Pipeline(_)
         | ParsedInput::PipelineChain { .. }
         | ParsedInput::BackgroundPipeline { .. }
@@ -966,6 +980,34 @@ fn token_to_operator_string(token: &Token) -> Option<&'static str> {
         Token::GreaterEqual => Some(">="),
         _ => None,
     }
+}
+
+#[test]
+fn parses_module_and_import_declarations() {
+    assert_eq!(
+        parse("module math").unwrap(),
+        ParsedInput::Module {
+            name: "math".into()
+        }
+    );
+    assert_eq!(
+        parse(r#"import "lib/math.crb""#).unwrap(),
+        ParsedInput::Import {
+            path: "lib/math.crb".into()
+        }
+    );
+}
+
+#[test]
+fn rejects_invalid_module_declarations() {
+    assert_eq!(
+        parse("module bad-name").unwrap_err(),
+        ParseError::InvalidModuleName("bad-name".into())
+    );
+    assert_eq!(
+        parse(r#"import "math.txt""#).unwrap_err(),
+        ParseError::InvalidModulePath("math.txt".into())
+    );
 }
 
 #[test]

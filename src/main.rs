@@ -1,6 +1,7 @@
 mod builtins;
 mod execution;
 mod history;
+mod modules;
 mod parser;
 mod prompt;
 mod runtime;
@@ -101,15 +102,21 @@ fn run_script(shell: &mut Shell, path: &str) -> i32 {
         return 2;
     }
 
-    let source = match fs::read_to_string(path) {
-        Ok(source) => source,
-        Err(err) => {
-            eprintln!("crbsh: {path}: {err}");
-            return 1;
+    execute_script(shell, Path::new(path))
+}
+
+fn execute_script(shell: &mut Shell, path: &Path) -> i32 {
+    let program = match modules::load_program(path) {
+        Ok(program) => program,
+        Err(diagnostics) => {
+            for diagnostic in diagnostics {
+                eprintln!("crbsh: {diagnostic}");
+            }
+            return 2;
         }
     };
 
-    execute_source(shell, &source)
+    execute_checked_program(shell, program)
 }
 
 fn run_interactive_config(shell: &mut Shell) {
@@ -157,6 +164,13 @@ fn execute_source(shell: &mut Shell, source: &str) -> i32 {
         }
     };
 
+    execute_checked_program(shell, program)
+}
+
+fn execute_checked_program(
+    shell: &mut Shell,
+    program: Vec<crab_lang::parser::LocatedInput>,
+) -> i32 {
     for located in program {
         let flow = execute_input(shell, located.input);
         if let Some(code) = handle_control_flow(shell, flow, false) {
@@ -891,6 +905,46 @@ let total = add(2, 3)
         assert_eq!(
             shell.evaluate(&Expression::Identifier("total".into())),
             Ok(Value::Int(5))
+        );
+    }
+
+    #[test]
+    fn runs_imported_module_functions_and_values() {
+        let root = temp_script_path("runs_imported_module_functions_and_values");
+        let module = root.with_file_name(format!(
+            "{}_math.crb",
+            root.file_stem().unwrap().to_string_lossy()
+        ));
+        fs::write(
+            &module,
+            r#"module math
+let base: int = 40
+
+fn add(value: int) -> int {
+    return base + value
+}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            &root,
+            format!(
+                "import \"{}\"\nlet total = math::add(2)\n",
+                module.file_name().unwrap().to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let mut shell = Shell::new();
+        let code = run_script(&mut shell, root.to_str().unwrap());
+
+        fs::remove_file(root).unwrap();
+        fs::remove_file(module).unwrap();
+
+        assert_eq!(code, 0);
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("total".into())),
+            Ok(Value::Int(42))
         );
     }
 

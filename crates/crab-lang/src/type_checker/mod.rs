@@ -190,6 +190,7 @@ impl<'host> TypeChecker<'host> {
 
     fn check_statement(&mut self, statement: &ParsedInput) {
         match statement {
+            ParsedInput::Module { .. } | ParsedInput::Import { .. } => {}
             ParsedInput::Let {
                 name,
                 type_annotation,

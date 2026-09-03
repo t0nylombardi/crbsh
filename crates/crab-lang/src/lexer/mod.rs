@@ -118,8 +118,13 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, TokenizeError> {
             }
 
             ':' if !in_single_quotes && !in_double_quotes => {
-                push_word(&mut tokens, &mut current, &mut quoted);
-                tokens.push(Token::Colon);
+                if matches!(chars.peek(), Some(':')) {
+                    chars.next();
+                    current.push_str("::");
+                } else {
+                    push_word(&mut tokens, &mut current, &mut quoted);
+                    tokens.push(Token::Colon);
+                }
             }
 
             ',' if !in_single_quotes && !in_double_quotes => {
@@ -274,6 +279,21 @@ mod tests {
                 Token::LeftBracket,
                 Token::IntLiteral(0),
                 Token::RightBracket,
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_qualified_names_as_one_word() {
+        assert_eq!(
+            tokenize("math::add(1, 2)").unwrap(),
+            vec![
+                Token::Word("math::add".into()),
+                Token::LeftParen,
+                Token::IntLiteral(1),
+                Token::Comma,
+                Token::IntLiteral(2),
+                Token::RightParen,
             ]
         );
     }

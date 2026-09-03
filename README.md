@@ -168,6 +168,29 @@ Other file extensions are rejected. Scripts can combine Unix commands with
 typed variables, functions, conditions, loops, matching, and structured
 pipelines. See the [Crab language guide](docs/language.md).
 
+Scripts may load relative `.crb` modules. An imported file declares one module
+namespace, and callers use `::` to access its top-level variables and functions:
+
+```crb
+# lib/math.crb
+module math
+
+let base: int = 40
+
+fn add(value: int) -> int {
+    return base + value
+}
+```
+
+```crb
+# main.crb
+import "lib/math.crb"
+let answer = math::add(2)
+```
+
+Import paths resolve relative to the importing file. Canonical paths are loaded
+once, while cyclic imports and duplicate module namespaces are rejected.
+
 ### Reject invalid files before side effects
 
 Before executing a `.crb` script or `~/.crbshrc`, `crbsh` parses and type checks
