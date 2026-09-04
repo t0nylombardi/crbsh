@@ -555,7 +555,23 @@ impl<'host> TypeChecker<'host> {
     }
 
     fn infer_record_stage(&mut self, name: &str, arguments: &[Expression]) -> Option<TypeName> {
-        if !arguments.len().is_multiple_of(2) {
+        let mut fields = std::collections::BTreeMap::new();
+        let (pairs, remainder) = arguments.as_chunks::<2>();
+
+        for [field_expr, value_expr] in pairs {
+            let field = match field_expr {
+                Expression::Identifier(name)
+                | Expression::Literal(crate::runtime::Value::String(name)) => Some(name.clone()),
+                _ => None,
+            };
+
+            let value_type = self.infer(value_expr);
+
+            if let (Some(field), Some(value_type)) = (field, value_type) {
+                fields.insert(field, value_type);
+            }
+        }
+        if !remainder.is_empty() {
             self.diagnostics.push(TypeDiagnostic::new(
                 TypeDiagnosticKind::StageArgumentCount {
                     stage: name.into(),
@@ -566,18 +582,6 @@ impl<'host> TypeChecker<'host> {
             return Some(TypeName::Record(None));
         }
 
-        let mut fields = std::collections::BTreeMap::new();
-        for pair in arguments.chunks_exact(2) {
-            let field = match &pair[0] {
-                Expression::Identifier(name)
-                | Expression::Literal(crate::runtime::Value::String(name)) => Some(name.clone()),
-                _ => None,
-            };
-            let value_type = self.infer(&pair[1]);
-            if let (Some(field), Some(value_type)) = (field, value_type) {
-                fields.insert(field, value_type);
-            }
-        }
         Some(TypeName::Record(Some(fields)))
     }
 
@@ -1581,6 +1585,7 @@ mod tests {
         fn native_stage(&self, command: &str) -> Option<NativeStageSignature> {
             match command {
                 "emit" => Some(NativeStageSignature::Values),
+                "row" => Some(NativeStageSignature::Record),
                 "limit" => Some(NativeStageSignature::Take),
                 "size" => Some(NativeStageSignature::Count),
                 "bundle" => Some(NativeStageSignature::Collect),
@@ -1604,6 +1609,23 @@ mod tests {
                 }
                 && diagnostic.expected == Some(TypeName::Int)
                 && diagnostic.found == Some(TypeName::String)
+        }));
+    }
+
+    #[test]
+    fn rejects_record_stage_without_complete_key_value_pairs() {
+        let host = TestHostTypes;
+        let program = [parsed("row name \"Tony\" age")];
+
+        let diagnostics = TypeChecker::check_with_host(&program, &host).unwrap_err();
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind
+                == TypeDiagnosticKind::StageArgumentCount {
+                    stage: "row".into(),
+                    expected: 4,
+                    found: 3,
+                }
         }));
     }
 
