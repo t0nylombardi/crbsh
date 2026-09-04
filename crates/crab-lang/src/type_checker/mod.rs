@@ -2,7 +2,7 @@ mod context;
 mod diagnostic;
 mod host;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub use context::{ContextError, TypeContext};
 pub use diagnostic::{TypeDiagnostic, TypeDiagnosticKind};
@@ -28,6 +28,8 @@ pub struct TypeChecker<'host> {
     function_scopes: Vec<HashMap<String, FunctionType>>,
     diagnostics: Vec<TypeDiagnostic>,
     current_function: Option<FunctionContext>,
+    named_types: HashMap<String, BTreeMap<String, TypeName>>,
+    checked_type_definitions: HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +56,8 @@ impl TypeChecker<'static> {
             function_scopes: vec![HashMap::new()],
             diagnostics: Vec::new(),
             current_function: None,
+            named_types: HashMap::new(),
+            checked_type_definitions: HashSet::new(),
         }
     }
 
@@ -103,6 +107,8 @@ impl<'host> TypeChecker<'host> {
             function_scopes: vec![HashMap::new()],
             diagnostics: Vec::new(),
             current_function: None,
+            named_types: HashMap::new(),
+            checked_type_definitions: HashSet::new(),
         }
     }
 
@@ -124,6 +130,7 @@ impl<'host> TypeChecker<'host> {
             .iter()
             .map(|located| located.input.clone())
             .collect::<Vec<_>>();
+        self.register_types(&statements);
         self.register_functions(&statements);
 
         for located in program {
@@ -182,15 +189,37 @@ impl<'host> TypeChecker<'host> {
     }
 
     fn check_statements(&mut self, statements: &[ParsedInput]) {
+        self.register_types(statements);
         self.register_functions(statements);
         for statement in statements {
             self.check_statement(statement);
         }
     }
 
+    fn register_types(&mut self, statements: &[ParsedInput]) {
+        for statement in statements {
+            if let ParsedInput::TypeDefinition { name, definition } = statement {
+                self.named_types
+                    .entry(name.clone())
+                    .or_insert_with(|| definition.fields.clone());
+            }
+        }
+    }
+
     fn check_statement(&mut self, statement: &ParsedInput) {
         match statement {
             ParsedInput::Module { .. } | ParsedInput::Import { .. } => {}
+            ParsedInput::TypeDefinition { name, definition } => {
+                if !self.checked_type_definitions.insert(name.clone()) {
+                    self.diagnostics
+                        .push(TypeDiagnostic::new(TypeDiagnosticKind::AlreadyDefined(
+                            name.clone(),
+                        )));
+                }
+                for type_name in definition.fields.values() {
+                    self.check_type_exists(type_name);
+                }
+            }
             ParsedInput::Let {
                 name,
                 type_annotation,
@@ -250,6 +279,9 @@ impl<'host> TypeChecker<'host> {
     }
 
     fn check_declaration(&mut self, name: &str, annotation: Option<&TypeName>, value: &Expression) {
+        if let Some(annotation) = annotation {
+            self.check_type_exists(annotation);
+        }
         let diagnostic_start = self.diagnostics.len();
         let Some(found) = self.infer(value) else {
             if self.diagnostics.len() == diagnostic_start {
@@ -330,6 +362,14 @@ impl<'host> TypeChecker<'host> {
     }
 
     fn check_function(&mut self, name: &str, definition: &FunctionDefinition) {
+        for param in &definition.params {
+            if let Some(type_name) = &param.type_annotation {
+                self.check_type_exists(type_name);
+            }
+        }
+        if let Some(type_name) = &definition.return_type {
+            self.check_type_exists(type_name);
+        }
         let function_context = self.context.function_context();
         let caller_context = std::mem::replace(&mut self.context, function_context);
         let function_unknowns = vec![
@@ -569,6 +609,9 @@ impl<'host> TypeChecker<'host> {
                 .symbol_type(HostSymbol::Environment(name.as_str())),
             Expression::Status => self.host.symbol_type(HostSymbol::Status),
             Expression::Call { name, args } => self.infer_call(name, args),
+            Expression::Construct { type_name, fields } => {
+                self.infer_construction(type_name, fields)
+            }
             Expression::List(values) => self.infer_list(values),
             Expression::Index { target, index } => self.infer_index(target, index),
             Expression::Field { target, name } => self.infer_field(target, name),
@@ -630,6 +673,17 @@ impl<'host> TypeChecker<'host> {
                 None
             }),
             Some(TypeName::Record(None)) => None,
+            Some(TypeName::Named(type_name)) => self
+                .named_types
+                .get(&type_name)
+                .and_then(|fields| fields.get(name))
+                .cloned()
+                .or_else(|| {
+                    self.diagnostics.push(TypeDiagnostic::new(
+                        TypeDiagnosticKind::MissingRecordField(name.into()),
+                    ));
+                    None
+                }),
             Some(found) => {
                 self.diagnostics.push(TypeDiagnostic::mismatch(
                     TypeDiagnosticKind::FieldTarget,
@@ -639,6 +693,58 @@ impl<'host> TypeChecker<'host> {
                 None
             }
             None => None,
+        }
+    }
+
+    fn infer_construction(
+        &mut self,
+        type_name: &str,
+        fields: &BTreeMap<String, Expression>,
+    ) -> Option<TypeName> {
+        let Some(expected_fields) = self.named_types.get(type_name).cloned() else {
+            self.diagnostics
+                .push(TypeDiagnostic::new(TypeDiagnosticKind::UnknownType(
+                    type_name.into(),
+                )));
+            for value in fields.values() {
+                self.infer(value);
+            }
+            return None;
+        };
+
+        for (name, expected) in &expected_fields {
+            match fields.get(name) {
+                Some(value) => self.expect(
+                    value,
+                    expected.clone(),
+                    TypeDiagnosticKind::Declaration(format!("{type_name}.{name}")),
+                ),
+                None => self.diagnostics.push(TypeDiagnostic::new(
+                    TypeDiagnosticKind::MissingConstructionField(name.clone()),
+                )),
+            }
+        }
+        for (name, value) in fields {
+            if !expected_fields.contains_key(name) {
+                self.diagnostics.push(TypeDiagnostic::new(
+                    TypeDiagnosticKind::UnexpectedConstructionField(name.clone()),
+                ));
+                self.infer(value);
+            }
+        }
+        Some(TypeName::Named(type_name.into()))
+    }
+
+    fn check_type_exists(&mut self, type_name: &TypeName) {
+        match type_name {
+            TypeName::Named(name) if !self.named_types.contains_key(name) => {
+                self.diagnostics
+                    .push(TypeDiagnostic::new(TypeDiagnosticKind::UnknownType(
+                        name.clone(),
+                    )))
+            }
+            TypeName::List(Some(element)) => self.check_type_exists(element),
+            _ => {}
         }
     }
 
@@ -1422,5 +1528,81 @@ mod tests {
         )];
 
         assert_eq!(TypeChecker::check(&program), Ok(()));
+    }
+
+    #[test]
+    fn checks_named_type_construction_fields_and_access() {
+        let valid = crate::parser::parse_source(
+            "type User { name: string, active: bool }\n\
+             let user: User = User { name: \"Tony\", active: true }\n\
+             let name: string = user.name\n",
+        )
+        .unwrap();
+        assert_eq!(
+            TypeChecker::check_located_with_host(&valid, &LANGUAGE_HOST_TYPES),
+            Ok(())
+        );
+
+        let invalid = crate::parser::parse_source(
+            "type User { name: string, active: bool }\n\
+             let user = User { name: 1, extra: true }\n",
+        )
+        .unwrap();
+        let diagnostics =
+            TypeChecker::check_located_with_host(&invalid, &LANGUAGE_HOST_TYPES).unwrap_err();
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == TypeDiagnosticKind::MissingConstructionField("active".into())
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == TypeDiagnosticKind::UnexpectedConstructionField("extra".into())
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.expected == Some(TypeName::String) && diagnostic.found == Some(TypeName::Int)
+        }));
+
+        let missing_field = crate::parser::parse_source(
+            "type User { name: string }\n\
+             let user = User { name: \"Tony\" }\n\
+             let email = user.email\n",
+        )
+        .unwrap();
+        let diagnostics =
+            TypeChecker::check_located_with_host(&missing_field, &LANGUAGE_HOST_TYPES).unwrap_err();
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == TypeDiagnosticKind::MissingRecordField("email".into())
+        }));
+    }
+
+    #[test]
+    fn uses_named_types_in_function_signatures() {
+        let program = crate::parser::parse_source(
+            "type User { name: string }\n\
+             fn identity(user: User) -> User {\nreturn user\n}\n\
+             let user = identity(User { name: \"Tony\" })\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            TypeChecker::check_located_with_host(&program, &LANGUAGE_HOST_TYPES),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn named_types_are_nominal_even_when_fields_match() {
+        let program = crate::parser::parse_source(
+            "type User { name: string }\n\
+             type Admin { name: string }\n\
+             let user = User { name: \"Tony\" }\n\
+             let admin: Admin = user\n",
+        )
+        .unwrap();
+        let diagnostics =
+            TypeChecker::check_located_with_host(&program, &LANGUAGE_HOST_TYPES).unwrap_err();
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.expected == Some(TypeName::Named("Admin".into()))
+                && diagnostic.found == Some(TypeName::Named("User".into()))
+        }));
     }
 }

@@ -47,6 +47,7 @@ pub enum TypeDiagnosticKind {
     AlreadyDefined(String),
     UndefinedVariable(String),
     UnknownFunction(String),
+    UnknownType(String),
     NonValueFunction(String),
     ArgumentCount {
         function: String,
@@ -65,6 +66,8 @@ pub enum TypeDiagnosticKind {
     IndexTarget,
     FieldTarget,
     MissingRecordField(String),
+    MissingConstructionField(String),
+    UnexpectedConstructionField(String),
     LengthTarget,
     MatchPattern,
     MatchArm,
@@ -105,6 +108,7 @@ impl fmt::Display for TypeDiagnostic {
             TypeDiagnosticKind::UnknownFunction(name) => {
                 write!(formatter, "undefined function '{name}'")
             }
+            TypeDiagnosticKind::UnknownType(name) => write!(formatter, "undefined type '{name}'"),
             TypeDiagnosticKind::NonValueFunction(name) => {
                 write!(formatter, "function '{name}' does not return a value")
             }
@@ -124,6 +128,12 @@ impl fmt::Display for TypeDiagnostic {
             }
             TypeDiagnosticKind::MissingRecordField(name) => {
                 write!(formatter, "record has no field '{name}'")
+            }
+            TypeDiagnosticKind::MissingConstructionField(name) => {
+                write!(formatter, "construction is missing field '{name}'")
+            }
+            TypeDiagnosticKind::UnexpectedConstructionField(name) => {
+                write!(formatter, "construction has unexpected field '{name}'")
             }
             TypeDiagnosticKind::StageArgumentCount {
                 stage,

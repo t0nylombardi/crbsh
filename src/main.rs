@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use runtime::{ControlFlow, execute_input};
 
 #[cfg(test)]
-use runtime::Value;
+use runtime::{TypeName, Value};
 #[cfg(test)]
 use runtime::{evaluate_expression, execute_function_call, glob_values};
 use shell::Shell;
@@ -171,6 +171,12 @@ fn execute_checked_program(
     shell: &mut Shell,
     program: Vec<crab_lang::parser::LocatedInput>,
 ) -> i32 {
+    for located in &program {
+        if let crab_lang::parser::ParsedInput::TypeDefinition { name, definition } = &located.input
+        {
+            shell.define_type(name.clone(), definition.clone());
+        }
+    }
     for located in program {
         let flow = execute_input(shell, located.input);
         if let Some(code) = handle_control_flow(shell, flow, false) {
@@ -299,6 +305,7 @@ fn last(items: list<string>) -> string {
     for item in items {
         result = item
     }
+
     return result
 }
 "#,
@@ -316,6 +323,38 @@ fn last(items: list<string>) -> string {
         assert_eq!(
             shell.evaluate(&Expression::Identifier("final".into())),
             Ok(Value::String("three".into()))
+        );
+    }
+
+    #[test]
+    fn named_types_construct_and_flow_through_functions() {
+        let mut shell = Shell::new();
+        let code = execute_source(
+            &mut shell,
+            r#"
+type User { name: string, active: bool }
+
+fn rename(user: User) -> User {
+    return User { name: "Winston", active: user.active }
+}
+
+let original: User = User { name: "Tony", active: true }
+let updated: User = rename(original)
+let updated_name: string = updated.name
+"#,
+        );
+
+        assert_eq!(code, 0);
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("updated_name".into())),
+            Ok(Value::String("Winston".into()))
+        );
+        assert_eq!(
+            shell
+                .evaluate(&Expression::Identifier("updated".into()))
+                .unwrap()
+                .type_name(),
+            TypeName::Named("User".into())
         );
     }
 

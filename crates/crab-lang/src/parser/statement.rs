@@ -1,5 +1,6 @@
 use crate::lexer::{Token, tokenize};
 use crate::runtime::{TypeName, Value};
+use std::collections::BTreeMap;
 
 #[cfg(test)]
 use crate::lexer::TokenizeError;
@@ -10,6 +11,7 @@ use super::error::ParseError;
 use super::expression::{parse_expression, token_to_expression, word_to_expression};
 use super::language::{
     Expression, FunctionDefinition, FunctionParam, IfBranch, Iterable, MatchArm, MatchPattern,
+    TypeDefinition,
 };
 
 #[cfg(test)]
@@ -96,6 +98,9 @@ pub fn parse(input: &str) -> Result<ParsedInput, ParseError> {
             }
             return Ok(ParsedInput::Import { path: path.clone() });
         }
+        [Token::Word(keyword), rest @ ..] if keyword == "type" => {
+            return parse_type_definition(rest);
+        }
         [Token::Word(keyword), rest @ ..] if keyword == "let" => {
             return parse_let(rest);
         }
@@ -126,6 +131,75 @@ pub fn parse(input: &str) -> Result<ParsedInput, ParseError> {
     }
 
     parse_pipeline(tokens).map(ParsedInput::Pipeline)
+}
+
+fn parse_type_definition(tokens: &[Token]) -> Result<ParsedInput, ParseError> {
+    let Some(Token::Word(name)) = tokens.first() else {
+        return Err(ParseError::MissingTypeName);
+    };
+    if !is_valid_identifier(name) {
+        return Err(ParseError::InvalidTypeName(name.clone()));
+    }
+    if !name.starts_with(|ch: char| ch.is_ascii_uppercase()) {
+        return Err(ParseError::InvalidTypeName(name.clone()));
+    }
+    if !matches!(tokens.get(1), Some(Token::LeftBrace)) {
+        return Err(ParseError::MissingBlockStart);
+    }
+
+    let mut fields = BTreeMap::new();
+    let mut position = 2;
+    while !matches!(tokens.get(position), Some(Token::RightBrace)) {
+        let Some(Token::Word(field)) = tokens.get(position) else {
+            return Err(ParseError::InvalidTypeField(String::new()));
+        };
+        if !is_valid_identifier(field) {
+            return Err(ParseError::InvalidTypeField(field.clone()));
+        }
+        if !matches!(tokens.get(position + 1), Some(Token::Colon)) {
+            return Err(ParseError::UnexpectedToken(
+                tokens
+                    .get(position + 1)
+                    .cloned()
+                    .unwrap_or(Token::Word(field.clone())),
+            ));
+        }
+        let (type_name, next) = parse_declared_type(tokens, position + 2)?;
+        if fields.insert(field.clone(), type_name).is_some() {
+            return Err(ParseError::DuplicateField(field.clone()));
+        }
+        position = next;
+        match tokens.get(position) {
+            Some(Token::Comma) => position += 1,
+            Some(Token::RightBrace) => {}
+            Some(token) => return Err(ParseError::UnexpectedToken(token.clone())),
+            None => return Err(ParseError::MissingBlockEnd),
+        }
+    }
+    if position + 1 != tokens.len() {
+        return Err(ParseError::UnexpectedToken(tokens[position + 1].clone()));
+    }
+
+    Ok(ParsedInput::TypeDefinition {
+        name: name.clone(),
+        definition: TypeDefinition { fields },
+    })
+}
+
+fn parse_declared_type(tokens: &[Token], position: usize) -> Result<(TypeName, usize), ParseError> {
+    let Some(Token::Word(name)) = tokens.get(position) else {
+        return Err(ParseError::InvalidTypeName(String::new()));
+    };
+    if name == "list" && matches!(tokens.get(position + 1), Some(Token::RedirectIn)) {
+        let (element, next) = parse_declared_type(tokens, position + 2)?;
+        if !matches!(tokens.get(next), Some(Token::RedirectOut)) {
+            return Err(ParseError::InvalidTypeName("list".into()));
+        }
+        return Ok((TypeName::List(Some(Box::new(element))), next + 1));
+    }
+    TypeName::parse(name)
+        .map(|type_name| (type_name, position + 1))
+        .ok_or_else(|| ParseError::InvalidTypeName(name.clone()))
 }
 
 fn parse_pipeline_chain(tokens: Vec<Token>) -> Result<ParsedInput, ParseError> {
@@ -423,6 +497,7 @@ fn contains_value_return(statement: &ParsedInput) -> bool {
         }
         ParsedInput::Module { .. }
         | ParsedInput::Import { .. }
+        | ParsedInput::TypeDefinition { .. }
         | ParsedInput::FunctionDefinition { .. }
         | ParsedInput::Pipeline(_)
         | ParsedInput::PipelineChain { .. }
@@ -547,15 +622,26 @@ fn parse_block_body(
         if starts_block_statement(line) {
             let (statement, next_index) = collect_block_statement(lines, index);
 
-            body.push(parse(&statement)?);
+            body.push(parse_block_input(&statement)?);
             index = next_index;
         } else {
-            body.push(parse(line)?);
+            body.push(parse_block_input(line)?);
             index += 1;
         }
     }
 
     Ok((body, index))
+}
+
+fn parse_block_input(source: &str) -> Result<ParsedInput, ParseError> {
+    let input = parse(source)?;
+    let directive = match input {
+        ParsedInput::Module { .. } => "module",
+        ParsedInput::Import { .. } => "import",
+        ParsedInput::TypeDefinition { .. } => "type",
+        _ => return Ok(input),
+    };
+    Err(ParseError::TopLevelOnly(directive.into()))
 }
 
 fn starts_block_statement(line: &str) -> bool {
@@ -996,6 +1082,36 @@ fn parses_module_and_import_declarations() {
             path: "lib/math.crb".into()
         }
     );
+}
+
+#[test]
+fn parses_named_type_declarations_and_construction() {
+    assert_eq!(
+        parse("type User { name: string, tags: list<string> }").unwrap(),
+        ParsedInput::TypeDefinition {
+            name: "User".into(),
+            definition: TypeDefinition {
+                fields: BTreeMap::from([
+                    ("name".into(), TypeName::String),
+                    (
+                        "tags".into(),
+                        TypeName::List(Some(Box::new(TypeName::String)))
+                    ),
+                ])
+            }
+        }
+    );
+
+    let ParsedInput::Let { value, .. } =
+        parse(r#"let user: User = User { name: "Tony", tags: ["shell"] }"#).unwrap()
+    else {
+        panic!("expected declaration");
+    };
+    assert!(matches!(
+        value,
+        Expression::Construct { type_name, fields }
+            if type_name == "User" && fields.len() == 2
+    ));
 }
 
 #[test]

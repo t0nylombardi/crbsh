@@ -8,6 +8,10 @@ pub enum Value {
     Bool(bool),
     List(Vec<Value>),
     Record(BTreeMap<String, Value>),
+    NamedRecord {
+        name: String,
+        fields: BTreeMap<String, Value>,
+    },
 }
 
 impl Value {
@@ -25,6 +29,7 @@ impl Value {
                     .map(|(name, value)| (name.clone(), value.type_name()))
                     .collect(),
             )),
+            Self::NamedRecord { name, .. } => TypeName::Named(name.clone()),
         }
     }
 }
@@ -51,6 +56,14 @@ impl fmt::Display for Value {
                     .join(", ");
                 write!(formatter, "{{{fields}}}")
             }
+            Self::NamedRecord { name, fields } => {
+                let fields = fields
+                    .iter()
+                    .map(|(field, value)| format!("{field}: {value}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(formatter, "{name} {{{fields}}}")
+            }
         }
     }
 }
@@ -62,6 +75,7 @@ pub enum TypeName {
     Bool,
     List(Option<Box<TypeName>>),
     Record(Option<BTreeMap<String, TypeName>>),
+    Named(String),
 }
 
 impl TypeName {
@@ -75,7 +89,8 @@ impl TypeName {
                 .strip_prefix("list<")
                 .and_then(|inner| inner.strip_suffix('>'))
                 .and_then(Self::parse)
-                .map(|inner| Self::List(Some(Box::new(inner)))),
+                .map(|inner| Self::List(Some(Box::new(inner))))
+                .or_else(|| valid_type_identifier(input).then(|| Self::Named(input.into()))),
         }
     }
 }
@@ -97,6 +112,7 @@ impl fmt::Display for TypeName {
                 write!(formatter, "record{{{fields}}}")
             }
             Self::Record(None) => write!(formatter, "record"),
+            Self::Named(name) => write!(formatter, "{name}"),
         }
     }
 }
@@ -115,7 +131,18 @@ impl TypeName {
                     })
             }
             (Self::Record(_), Self::Record(None)) | (Self::Record(None), Self::Record(_)) => true,
+            (Self::Named(expected), Self::Named(actual)) => expected == actual,
             _ => self == actual,
         }
     }
+}
+
+fn valid_type_identifier(input: &str) -> bool {
+    let valid = input.split("::").all(|part| {
+        let mut chars = part.chars();
+        matches!(chars.next(), Some(ch) if ch == '_' || ch.is_ascii_alphabetic())
+            && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+    });
+    let name = input.rsplit("::").next().unwrap_or_default();
+    valid && name.starts_with(|ch: char| ch.is_ascii_uppercase())
 }

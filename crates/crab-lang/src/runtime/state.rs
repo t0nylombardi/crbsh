@@ -1,10 +1,13 @@
-use crate::parser::FunctionDefinition;
+use std::collections::{BTreeMap, HashMap};
+
+use crate::parser::{FunctionDefinition, TypeDefinition};
 
 use super::{FunctionRegistry, ScopeError, ScopeStack, TypeName, Value};
 
 pub struct LanguageRuntime {
     scopes: ScopeStack,
     functions: FunctionRegistry,
+    types: HashMap<String, TypeDefinition>,
 }
 
 impl Default for LanguageRuntime {
@@ -18,6 +21,7 @@ impl LanguageRuntime {
         Self {
             scopes: ScopeStack::new(),
             functions: FunctionRegistry::new(),
+            types: HashMap::new(),
         }
     }
 
@@ -72,6 +76,16 @@ impl LanguageRuntime {
 
     pub fn function(&self, name: &str) -> Option<FunctionDefinition> {
         self.functions.get(name)
+    }
+
+    pub fn define_type(&mut self, name: String, definition: TypeDefinition) {
+        self.types.insert(name, definition);
+    }
+
+    pub fn type_fields(&self, name: &str) -> Option<BTreeMap<String, TypeName>> {
+        self.types
+            .get(name)
+            .map(|definition| definition.fields.clone())
     }
 
     pub fn enter_function_call(&mut self) -> Result<(), usize> {

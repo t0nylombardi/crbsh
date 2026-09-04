@@ -203,9 +203,9 @@ fn qualify_module(program: &mut [LocatedInput], namespace: &str) {
     let globals = program
         .iter()
         .filter_map(|located| match &located.input {
-            ParsedInput::Let { name, .. } | ParsedInput::FunctionDefinition { name, .. } => {
-                Some(name.clone())
-            }
+            ParsedInput::Let { name, .. }
+            | ParsedInput::FunctionDefinition { name, .. }
+            | ParsedInput::TypeDefinition { name, .. } => Some(name.clone()),
             _ => None,
         })
         .collect::<HashSet<_>>();
@@ -242,7 +242,14 @@ impl NamespaceRewriter {
 
     fn statement(&mut self, statement: &mut ParsedInput, top_level: bool) {
         match statement {
-            ParsedInput::Let { name, value, .. } => {
+            ParsedInput::Let {
+                name,
+                type_annotation,
+                value,
+            } => {
+                if let Some(type_name) = type_annotation {
+                    self.type_name(type_name);
+                }
                 self.expression(value);
                 if top_level {
                     *name = self.qualified(name);
@@ -265,6 +272,12 @@ impl NamespaceRewriter {
             ParsedInput::FunctionDefinition { name, definition } => {
                 *name = self.qualified(name);
                 self.function(definition);
+            }
+            ParsedInput::TypeDefinition { name, definition } => {
+                *name = self.qualified(name);
+                for type_name in definition.fields.values_mut() {
+                    self.type_name(type_name);
+                }
             }
             ParsedInput::If {
                 branches,
@@ -321,6 +334,14 @@ impl NamespaceRewriter {
     }
 
     fn function(&mut self, definition: &mut FunctionDefinition) {
+        for param in &mut definition.params {
+            if let Some(type_name) = &mut param.type_annotation {
+                self.type_name(type_name);
+            }
+        }
+        if let Some(type_name) = &mut definition.return_type {
+            self.type_name(type_name);
+        }
         self.locals.push(
             definition
                 .params
@@ -368,6 +389,14 @@ impl NamespaceRewriter {
                     self.expression(argument);
                 }
             }
+            Expression::Construct { type_name, fields } => {
+                if self.resolves_global(type_name) {
+                    *type_name = self.qualified(type_name);
+                }
+                for value in fields.values_mut() {
+                    self.expression(value);
+                }
+            }
             Expression::List(values) => {
                 for value in values {
                     self.expression(value);
@@ -390,6 +419,16 @@ impl NamespaceRewriter {
                 }
             }
             Expression::Literal(_) | Expression::EnvironmentVariable(_) | Expression::Status => {}
+        }
+    }
+
+    fn type_name(&self, type_name: &mut crab_lang::runtime::TypeName) {
+        match type_name {
+            crab_lang::runtime::TypeName::Named(name) if self.resolves_global(name) => {
+                *name = self.qualified(name);
+            }
+            crab_lang::runtime::TypeName::List(Some(element)) => self.type_name(element),
+            _ => {}
         }
     }
 }
@@ -492,6 +531,30 @@ mod tests {
         assert!(matches!(
             diagnostics.as_slice(),
             [ModuleDiagnostic::Static { .. }]
+        ));
+    }
+
+    #[test]
+    fn qualifies_named_types_exported_by_modules() {
+        let directory = temp_directory("named_type");
+        fs::write(
+            directory.join("models.crb"),
+            "module models\ntype User { name: string }\n",
+        )
+        .unwrap();
+        let root = directory.join("main.crb");
+        fs::write(
+            &root,
+            "import \"models.crb\"\nlet user: models::User = models::User { name: \"Tony\" }\n",
+        )
+        .unwrap();
+
+        let program = load_program(&root).unwrap();
+        fs::remove_dir_all(directory).unwrap();
+
+        assert!(matches!(
+            &program[0].input,
+            ParsedInput::TypeDefinition { name, .. } if name == "models::User"
         ));
     }
 }

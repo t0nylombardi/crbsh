@@ -168,6 +168,14 @@ Other file extensions are rejected. Scripts can combine Unix commands with
 typed variables, functions, conditions, loops, matching, and structured
 pipelines. See the [Crab language guide](docs/language.md).
 
+Crab also supports reusable named record types with checked construction and
+field access:
+
+```crb
+type User { name: string, active: bool }
+let user: User = User { name: "Tony", active: true }
+```
+
 Scripts may load relative `.crb` modules. An imported file declares one module
 namespace, and callers use `::` to access its top-level variables and functions:
 

@@ -13,6 +13,8 @@ pub enum ParseError {
     InvalidIterable(String),
     InvalidModuleName(String),
     InvalidModulePath(String),
+    InvalidTypeField(String),
+    DuplicateField(String),
     MissingBlockStart,
     MissingAssignmentValue,
     MissingFunctionName,
@@ -23,8 +25,10 @@ pub enum ParseError {
     MissingReturnType,
     MissingMatchArrow,
     MissingMatchPattern,
+    MissingTypeName,
     NonExhaustiveMatchExpression,
     ReservedName(String),
+    TopLevelOnly(String),
     UnsupportedRedirection(Token),
     UnexpectedToken(Token),
 }
@@ -49,6 +53,8 @@ impl fmt::Display for ParseError {
             Self::InvalidIterable(value) => write!(formatter, "invalid iterable '{value}'"),
             Self::InvalidModuleName(name) => write!(formatter, "invalid module name '{name}'"),
             Self::InvalidModulePath(path) => write!(formatter, "invalid module path '{path}'"),
+            Self::InvalidTypeField(name) => write!(formatter, "invalid type field '{name}'"),
+            Self::DuplicateField(name) => write!(formatter, "duplicate field '{name}'"),
             Self::MissingBlockStart => write!(formatter, "missing block start '{{'"),
             Self::MissingAssignmentValue => write!(formatter, "missing assignment value"),
             Self::MissingFunctionName => write!(formatter, "missing function name"),
@@ -61,12 +67,14 @@ impl fmt::Display for ParseError {
             Self::MissingReturnType => write!(formatter, "missing return type"),
             Self::MissingMatchArrow => write!(formatter, "missing match arrow '=>'"),
             Self::MissingMatchPattern => write!(formatter, "missing match pattern"),
+            Self::MissingTypeName => write!(formatter, "missing type name"),
             Self::NonExhaustiveMatchExpression => {
                 write!(formatter, "match expression requires a wildcard '_' arm")
             }
             Self::ReservedName(name) => {
                 write!(formatter, "cannot assign to reserved name '{name}'")
             }
+            Self::TopLevelOnly(name) => write!(formatter, "'{name}' is only valid at top level"),
             Self::UnsupportedRedirection(token) => write!(
                 formatter,
                 "unsupported redirection near {}",

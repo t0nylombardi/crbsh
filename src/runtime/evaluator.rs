@@ -44,6 +44,10 @@ pub(crate) fn execute_input(shell: &mut Shell, parsed_input: ParsedInput) -> Con
         ParsedInput::Module { .. } | ParsedInput::Import { .. } => {
             return ControlFlow::Error("module directives require a .crb script".into());
         }
+        ParsedInput::TypeDefinition { name, definition } => {
+            shell.define_type(name, definition);
+            shell.exit_code = 0;
+        }
         ParsedInput::FunctionDefinition { name, definition } => {
             shell.define_function(name, definition);
             shell.exit_code = 0;
@@ -379,6 +383,7 @@ fn raw_builtin_arg(argument: &Expression) -> Result<String, ShellError> {
             format!("{}.{}", raw_builtin_arg(target)?, name)
         }
         Expression::List(_)
+        | Expression::Construct { .. }
         | Expression::Index { .. }
         | Expression::Match { .. }
         | Expression::Len(_) => {
@@ -673,6 +678,13 @@ pub(crate) fn evaluate_expression(
                 value.ok_or_else(|| format!("function '{name}' did not return a value"))
             })
             .map_err(EvalError::Function),
+        parser::Expression::Construct { type_name, fields } => fields
+            .iter()
+            .map(|(name, expression)| {
+                evaluate_expression(shell, expression).map(|value| (name.clone(), value))
+            })
+            .collect::<Result<_, _>>()
+            .and_then(|fields| shell.construct(type_name, fields).map_err(Into::into)),
         parser::Expression::List(expressions) => expressions
             .iter()
             .map(|expression| evaluate_expression(shell, expression))

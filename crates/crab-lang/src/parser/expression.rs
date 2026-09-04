@@ -1,5 +1,6 @@
 use crate::lexer::Token;
 use crate::runtime::Value;
+use std::collections::BTreeMap;
 
 use super::error::ParseError;
 use super::language::{BinaryOperator, Expression, MatchExpressionArm, MatchPattern};
@@ -110,6 +111,15 @@ impl<'a> ExpressionParser<'a> {
         {
             self.position += 1;
             let expression = self.parse_call(name.clone())?;
+            return self.parse_postfix(expression);
+        }
+
+        if let Token::Word(name) = token
+            && is_named_type(name)
+            && matches!(self.peek(), Some(Token::LeftBrace))
+        {
+            self.position += 1;
+            let expression = self.parse_construction(name.clone())?;
             return self.parse_postfix(expression);
         }
 
@@ -261,6 +271,45 @@ impl<'a> ExpressionParser<'a> {
         Ok(Expression::Call { name, args })
     }
 
+    fn parse_construction(&mut self, type_name: String) -> Result<Expression, ParseError> {
+        let mut fields = BTreeMap::new();
+        if matches!(self.peek(), Some(Token::RightBrace)) {
+            self.position += 1;
+            return Ok(Expression::Construct { type_name, fields });
+        }
+
+        loop {
+            let Some(Token::Word(name)) = self.advance() else {
+                return Err(ParseError::InvalidTypeField(String::new()));
+            };
+            let name = name.clone();
+            if !is_field_name(&name) {
+                return Err(ParseError::InvalidTypeField(name));
+            }
+            match self.advance() {
+                Some(Token::Colon) => {}
+                Some(token) => return Err(ParseError::UnexpectedToken(token.clone())),
+                None => return Err(ParseError::MissingAssignmentValue),
+            }
+            let value = self.parse_equality()?;
+            if fields.insert(name.clone(), value).is_some() {
+                return Err(ParseError::DuplicateField(name));
+            }
+
+            match self.peek() {
+                Some(Token::Comma) => self.position += 1,
+                Some(Token::RightBrace) => {
+                    self.position += 1;
+                    break;
+                }
+                Some(token) => return Err(ParseError::UnexpectedToken(token.clone())),
+                None => return Err(ParseError::MissingBlockEnd),
+            }
+        }
+
+        Ok(Expression::Construct { type_name, fields })
+    }
+
     fn match_equality_operator(&mut self) -> Option<BinaryOperator> {
         match self.peek() {
             Some(Token::Equal) => {
@@ -334,6 +383,18 @@ impl<'a> ExpressionParser<'a> {
         self.position += 1;
         Some(token)
     }
+}
+
+fn is_named_type(name: &str) -> bool {
+    name.rsplit("::")
+        .next()
+        .is_some_and(|name| name.starts_with(|ch: char| ch.is_ascii_uppercase()))
+}
+
+fn is_field_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(ch) if ch == '_' || ch.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn parse_member_target(path: &str) -> Expression {

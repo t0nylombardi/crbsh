@@ -4,7 +4,9 @@ use std::fmt;
 use crate::builtins::registry::BuiltinRegistry;
 use crate::execution::JobManager;
 use crate::history::History;
-use crate::parser::{BinaryOperator, Expression, FunctionDefinition, MatchPattern, ParsedCommand};
+use crate::parser::{
+    BinaryOperator, Expression, FunctionDefinition, MatchPattern, ParsedCommand, TypeDefinition,
+};
 use crate::runtime::{LanguageRuntime, ScopeError, ScopeStack, TypeName, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +43,9 @@ pub enum ShellError {
     },
     NegativeIndex(i64),
     MissingRecordField(String),
+    UnknownType(String),
+    MissingConstructionField(String),
+    UnexpectedConstructionField(String),
     NonExhaustiveMatch,
 }
 
@@ -164,6 +169,40 @@ impl Shell {
         self.runtime.function(name)
     }
 
+    pub fn define_type(&mut self, name: impl Into<String>, definition: TypeDefinition) {
+        self.runtime.define_type(name.into(), definition);
+    }
+
+    pub fn construct(
+        &self,
+        type_name: &str,
+        fields: std::collections::BTreeMap<String, Value>,
+    ) -> Result<Value, ShellError> {
+        let expected = self
+            .runtime
+            .type_fields(type_name)
+            .ok_or_else(|| ShellError::UnknownType(type_name.into()))?;
+        for (name, expected_type) in &expected {
+            let value = fields
+                .get(name)
+                .ok_or_else(|| ShellError::MissingConstructionField(name.clone()))?;
+            let found = value.type_name();
+            if !expected_type.accepts(&found) {
+                return Err(ShellError::TypeMismatch {
+                    expected: expected_type.clone(),
+                    found,
+                });
+            }
+        }
+        if let Some(name) = fields.keys().find(|name| !expected.contains_key(*name)) {
+            return Err(ShellError::UnexpectedConstructionField(name.clone()));
+        }
+        Ok(Value::NamedRecord {
+            name: type_name.into(),
+            fields,
+        })
+    }
+
     pub fn enter_function_call(&mut self) -> Result<(), usize> {
         self.runtime.enter_function_call()
     }
@@ -236,6 +275,13 @@ impl Shell {
                 .collect::<Result<Vec<_>, _>>()
                 .and_then(validate_list_values)
                 .map(Value::List),
+            Expression::Construct { type_name, fields } => fields
+                .iter()
+                .map(|(name, expression)| {
+                    self.evaluate(expression).map(|value| (name.clone(), value))
+                })
+                .collect::<Result<_, _>>()
+                .and_then(|fields| self.construct(type_name, fields)),
             Expression::Index { target, index } => {
                 evaluate_index(self.evaluate(target)?, self.evaluate(index)?)
             }
@@ -386,6 +432,13 @@ impl fmt::Display for ShellError {
                 write!(formatter, "list index cannot be negative: {index}")
             }
             Self::MissingRecordField(name) => write!(formatter, "record has no field '{name}'"),
+            Self::UnknownType(name) => write!(formatter, "undefined type '{name}'"),
+            Self::MissingConstructionField(name) => {
+                write!(formatter, "construction is missing field '{name}'")
+            }
+            Self::UnexpectedConstructionField(name) => {
+                write!(formatter, "construction has unexpected field '{name}'")
+            }
             Self::NonExhaustiveMatch => write!(formatter, "non-exhaustive match expression"),
         }
     }
@@ -527,11 +580,14 @@ pub fn evaluate_index(target: Value, index: Value) -> Result<Value, ShellError> 
 }
 
 pub fn evaluate_field(target: Value, name: &str) -> Result<Value, ShellError> {
-    let Value::Record(mut fields) = target else {
-        return Err(ShellError::TypeMismatch {
-            expected: TypeName::Record(None),
-            found: target.type_name(),
-        });
+    let mut fields = match target {
+        Value::Record(fields) | Value::NamedRecord { fields, .. } => fields,
+        target => {
+            return Err(ShellError::TypeMismatch {
+                expected: TypeName::Record(None),
+                found: target.type_name(),
+            });
+        }
     };
     fields
         .remove(name)

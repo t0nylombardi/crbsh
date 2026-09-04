@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use crate::runtime::{TypeName, Value};
 
 use super::ParsedInput;
@@ -11,6 +13,10 @@ pub enum Expression {
     Call {
         name: String,
         args: Vec<Expression>,
+    },
+    Construct {
+        type_name: String,
+        fields: BTreeMap<String, Expression>,
     },
     List(Vec<Expression>),
     Index {
@@ -87,6 +93,11 @@ pub struct FunctionDefinition {
 pub struct FunctionParam {
     pub name: String,
     pub type_annotation: Option<TypeName>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeDefinition {
+    pub fields: BTreeMap<String, TypeName>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

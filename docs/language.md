@@ -66,6 +66,48 @@ diagnostic when a known record has no such field. A plain `record` annotation
 has an unknown shape, so its fields cannot be proven until shape information is
 available.
 
+### Named Types
+
+Named types give a reusable, nominal identity to a fixed set of typed fields.
+Type names begin with an uppercase letter:
+
+```crb
+type User {
+    name: string,
+    active: bool,
+    tags: list<string>
+}
+
+let user: User = User {
+    name: "Tony",
+    active: true,
+    tags: ["shell", "rust"]
+}
+```
+
+Construction requires every declared field exactly once, rejects undeclared
+fields, and checks each value against its field type. Named types are nominal:
+two declarations with identical fields are still different types. Field access
+retains the declared field type, so `user.name` is a `string`.
+
+Named types may be used in variable annotations, list element types, function
+parameters, and function return types:
+
+```crb
+fn deactivate(user: User) -> User {
+    return User {
+        name: user.name,
+        active: false,
+        tags: user.tags
+    }
+}
+```
+
+Type declarations are top-level and are collected before whole-program type
+checking, allowing functions to share their definitions without anonymous
+record shapes. Modules export named types through their namespace, such as
+`models::User`.
+
 ## Expressions
 
 Expressions include literals, identifiers, environment values, status,
