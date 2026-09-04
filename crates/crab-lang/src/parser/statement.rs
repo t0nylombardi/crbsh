@@ -8,10 +8,12 @@ use crate::lexer::TokenizeError;
 use super::ast::ParsedInput;
 use super::command::{OutputRedirection, ParsedCommand, Pipeline, PipelineConnector, Redirections};
 use super::error::ParseError;
-use super::expression::{parse_expression, token_to_expression, word_to_expression};
+use super::expression::{
+    enum_variant_path, parse_expression, token_to_expression, word_to_expression,
+};
 use super::language::{
-    Expression, FunctionDefinition, FunctionParam, IfBranch, Iterable, MatchArm, MatchPattern,
-    TypeDefinition,
+    EnumDefinition, Expression, FunctionDefinition, FunctionParam, IfBranch, Iterable, MatchArm,
+    MatchPattern, TypeDefinition,
 };
 
 #[cfg(test)]
@@ -101,6 +103,9 @@ pub fn parse(input: &str) -> Result<ParsedInput, ParseError> {
         [Token::Word(keyword), rest @ ..] if keyword == "type" => {
             return parse_type_definition(rest);
         }
+        [Token::Word(keyword), rest @ ..] if keyword == "enum" => {
+            return parse_enum_definition(rest);
+        }
         [Token::Word(keyword), rest @ ..] if keyword == "let" => {
             return parse_let(rest);
         }
@@ -131,6 +136,58 @@ pub fn parse(input: &str) -> Result<ParsedInput, ParseError> {
     }
 
     parse_pipeline(tokens).map(ParsedInput::Pipeline)
+}
+
+fn parse_enum_definition(tokens: &[Token]) -> Result<ParsedInput, ParseError> {
+    let Some(Token::Word(name)) = tokens.first() else {
+        return Err(ParseError::MissingTypeName);
+    };
+    if !is_valid_identifier(name) || !name.starts_with(|ch: char| ch.is_ascii_uppercase()) {
+        return Err(ParseError::InvalidTypeName(name.clone()));
+    }
+    if !matches!(tokens.get(1), Some(Token::LeftBrace)) {
+        return Err(ParseError::MissingBlockStart);
+    }
+    let mut variants = BTreeMap::new();
+    let mut position = 2;
+    while !matches!(tokens.get(position), Some(Token::RightBrace)) {
+        let Some(Token::Word(variant)) = tokens.get(position) else {
+            return Err(ParseError::InvalidEnumVariant(String::new()));
+        };
+        if !is_valid_identifier(variant) || !variant.starts_with(|ch: char| ch.is_ascii_uppercase())
+        {
+            return Err(ParseError::InvalidEnumVariant(variant.clone()));
+        }
+        position += 1;
+        let payload = if matches!(tokens.get(position), Some(Token::LeftParen)) {
+            let (payload, next) = parse_declared_type(tokens, position + 1)?;
+            if !matches!(tokens.get(next), Some(Token::RightParen)) {
+                return Err(ParseError::UnexpectedToken(
+                    tokens.get(next).cloned().unwrap_or(Token::LeftParen),
+                ));
+            }
+            position = next + 1;
+            Some(payload)
+        } else {
+            None
+        };
+        if variants.insert(variant.clone(), payload).is_some() {
+            return Err(ParseError::DuplicateEnumVariant(variant.clone()));
+        }
+        match tokens.get(position) {
+            Some(Token::Comma) => position += 1,
+            Some(Token::RightBrace) => {}
+            Some(token) => return Err(ParseError::UnexpectedToken(token.clone())),
+            None => return Err(ParseError::MissingBlockEnd),
+        }
+    }
+    if position + 1 != tokens.len() {
+        return Err(ParseError::UnexpectedToken(tokens[position + 1].clone()));
+    }
+    Ok(ParsedInput::EnumDefinition {
+        name: name.clone(),
+        definition: EnumDefinition { variants },
+    })
 }
 
 fn parse_type_definition(tokens: &[Token]) -> Result<ParsedInput, ParseError> {
@@ -498,6 +555,7 @@ fn contains_value_return(statement: &ParsedInput) -> bool {
         ParsedInput::Module { .. }
         | ParsedInput::Import { .. }
         | ParsedInput::TypeDefinition { .. }
+        | ParsedInput::EnumDefinition { .. }
         | ParsedInput::FunctionDefinition { .. }
         | ParsedInput::Pipeline(_)
         | ParsedInput::PipelineChain { .. }
@@ -639,6 +697,7 @@ fn parse_block_input(source: &str) -> Result<ParsedInput, ParseError> {
         ParsedInput::Module { .. } => "module",
         ParsedInput::Import { .. } => "import",
         ParsedInput::TypeDefinition { .. } => "type",
+        ParsedInput::EnumDefinition { .. } => "enum",
         _ => return Ok(input),
     };
     Err(ParseError::TopLevelOnly(directive.into()))
@@ -718,11 +777,24 @@ fn parse_expression_from_source(input: &str) -> Result<Expression, ParseError> {
 fn parse_match_pattern(input: &str) -> Result<MatchPattern, ParseError> {
     let tokens = tokenize(input)?;
 
+    if let Some(Token::Word(path)) = tokens.first()
+        && let Some((enum_name, variant)) = enum_variant_path(path)
+    {
+        let binding = match tokens.as_slice() {
+            [_, Token::LeftParen, Token::Word(binding), Token::RightParen] => Some(binding.clone()),
+            [_] => None,
+            _ => return Err(ParseError::MissingMatchPattern),
+        };
+        return Ok(MatchPattern::EnumVariant {
+            enum_name: enum_name.into(),
+            variant: variant.into(),
+            binding,
+        });
+    }
     let [token] = tokens.as_slice() else {
         if tokens.is_empty() {
             return Err(ParseError::MissingMatchPattern);
         }
-
         return Err(ParseError::UnexpectedToken(
             tokens
                 .first()
@@ -730,7 +802,6 @@ fn parse_match_pattern(input: &str) -> Result<MatchPattern, ParseError> {
                 .unwrap_or_else(|| Token::Word(input.into())),
         ));
     };
-
     match token {
         Token::Wildcard => Ok(MatchPattern::Wildcard),
         Token::StringLiteral(value) => Ok(MatchPattern::Literal(Value::String(value.clone()))),
@@ -1112,6 +1183,37 @@ fn parses_named_type_declarations_and_construction() {
         Expression::Construct { type_name, fields }
             if type_name == "User" && fields.len() == 2
     ));
+}
+
+#[test]
+fn parses_enum_declarations_variants_and_patterns() {
+    assert_eq!(
+        parse("enum JobState { Running, Done(int) }").unwrap(),
+        ParsedInput::EnumDefinition {
+            name: "JobState".into(),
+            definition: EnumDefinition {
+                variants: BTreeMap::from([
+                    ("Done".into(), Some(TypeName::Int)),
+                    ("Running".into(), None),
+                ])
+            }
+        }
+    );
+    let ParsedInput::Let { value, .. } = parse("let state = JobState::Done(0)").unwrap() else {
+        panic!("expected declaration");
+    };
+    assert!(
+        matches!(value, Expression::EnumVariant { enum_name, variant, payload: Some(_) } if enum_name == "JobState" && variant == "Done")
+    );
+    let ParsedInput::Match { arms, .. } =
+        parse("match JobState::Done(1) {\nJobState::Done(code) => print code\n_ => print 0\n}")
+            .unwrap()
+    else {
+        panic!("expected match");
+    };
+    assert!(
+        matches!(&arms[0].pattern, MatchPattern::EnumVariant { binding: Some(binding), .. } if binding == "code")
+    );
 }
 
 #[test]

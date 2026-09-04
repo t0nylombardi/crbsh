@@ -176,6 +176,10 @@ fn execute_checked_program(
         {
             shell.define_type(name.clone(), definition.clone());
         }
+        if let crab_lang::parser::ParsedInput::EnumDefinition { name, definition } = &located.input
+        {
+            shell.define_enum(name.clone(), definition.clone());
+        }
     }
     for located in program {
         let flow = execute_input(shell, located.input);
@@ -355,6 +359,35 @@ let updated_name: string = updated.name
                 .unwrap()
                 .type_name(),
             TypeName::Named("User".into())
+        );
+    }
+
+    #[test]
+    fn enum_payloads_flow_through_typed_matches() {
+        let mut shell = Shell::new();
+        let code = execute_source(
+            &mut shell,
+            r#"
+enum PipelinePayload { Empty, Count(int) }
+
+fn count(payload: PipelinePayload) -> int {
+    return match payload { PipelinePayload::Count(value) => value, _ => 0 }
+}
+
+let payload: PipelinePayload = PipelinePayload::Count(42)
+let result: int = count(payload)
+let empty: PipelinePayload = PipelinePayload::Empty
+let empty_result: int = count(empty)
+"#,
+        );
+        assert_eq!(code, 0);
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("result".into())),
+            Ok(Value::Int(42))
+        );
+        assert_eq!(
+            shell.evaluate(&Expression::Identifier("empty_result".into())),
+            Ok(Value::Int(0))
         );
     }
 

@@ -176,6 +176,14 @@ type User { name: string, active: bool }
 let user: User = User { name: "Tony", active: true }
 ```
 
+Closed enum types support unit variants, typed payloads, and checked matching:
+
+```crb
+enum JobState { Running, Done(int) }
+let state: JobState = JobState::Done(0)
+let code = match state { JobState::Done(value) => value, _ => 1 }
+```
+
 Scripts may load relative `.crb` modules. An imported file declares one module
 namespace, and callers use `::` to access its top-level variables and functions:
 

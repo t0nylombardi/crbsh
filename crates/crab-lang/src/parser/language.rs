@@ -18,6 +18,11 @@ pub enum Expression {
         type_name: String,
         fields: BTreeMap<String, Expression>,
     },
+    EnumVariant {
+        enum_name: String,
+        variant: String,
+        payload: Option<Box<Expression>>,
+    },
     List(Vec<Expression>),
     Index {
         target: Box<Expression>,
@@ -101,6 +106,11 @@ pub struct TypeDefinition {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumDefinition {
+    pub variants: BTreeMap<String, Option<TypeName>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Iterable {
     Range {
         start: Expression,
@@ -129,4 +139,9 @@ pub enum MatchPattern {
     Identifier(String),
     Status,
     Wildcard,
+    EnumVariant {
+        enum_name: String,
+        variant: String,
+        binding: Option<String>,
+    },
 }

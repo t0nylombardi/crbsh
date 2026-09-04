@@ -108,6 +108,43 @@ checking, allowing functions to share their definitions without anonymous
 record shapes. Modules export named types through their namespace, such as
 `models::User`.
 
+### Enums and Tagged Unions
+
+Enums define a closed set of variants. A variant is either a unit value or
+carries one typed payload:
+
+```crb
+enum JobState {
+    Running,
+    Done(int),
+    Failed(string)
+}
+
+let running: JobState = JobState::Running
+let done: JobState = JobState::Done(0)
+```
+
+Construction checks that the variant exists, that payload variants receive a
+value of the declared type, and that unit variants receive no payload. Enum
+values retain their nominal enum type.
+
+Enum variants participate in `match`. Payload patterns may bind the contained
+value in the arm's lexical scope:
+
+```crb
+let exit_code = match state {
+    JobState::Done(code) => code,
+    JobState::Running => 0,
+    _ => 1
+}
+```
+
+The type checker rejects variants from an incompatible enum, unknown variants,
+payload-shape errors, and non-exhaustive enum statement matches. Match
+expressions continue to require a wildcard arm under the current general match
+rules. Enums are top-level declarations and are exported from modules through
+qualified names such as `jobs::JobState`.
+
 ## Expressions
 
 Expressions include literals, identifiers, environment values, status,

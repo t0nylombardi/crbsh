@@ -12,6 +12,11 @@ pub enum Value {
         name: String,
         fields: BTreeMap<String, Value>,
     },
+    Enum {
+        enum_name: String,
+        variant: String,
+        payload: Option<Box<Value>>,
+    },
 }
 
 impl Value {
@@ -30,6 +35,7 @@ impl Value {
                     .collect(),
             )),
             Self::NamedRecord { name, .. } => TypeName::Named(name.clone()),
+            Self::Enum { enum_name, .. } => TypeName::Named(enum_name.clone()),
         }
     }
 }
@@ -64,6 +70,14 @@ impl fmt::Display for Value {
                     .join(", ");
                 write!(formatter, "{name} {{{fields}}}")
             }
+            Self::Enum {
+                enum_name,
+                variant,
+                payload,
+            } => match payload {
+                Some(payload) => write!(formatter, "{enum_name}::{variant}({payload})"),
+                None => write!(formatter, "{enum_name}::{variant}"),
+            },
         }
     }
 }

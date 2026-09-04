@@ -30,6 +30,7 @@ pub struct TypeChecker<'host> {
     current_function: Option<FunctionContext>,
     named_types: HashMap<String, BTreeMap<String, TypeName>>,
     checked_type_definitions: HashSet<String>,
+    enum_types: HashMap<String, BTreeMap<String, Option<TypeName>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +59,7 @@ impl TypeChecker<'static> {
             current_function: None,
             named_types: HashMap::new(),
             checked_type_definitions: HashSet::new(),
+            enum_types: HashMap::new(),
         }
     }
 
@@ -109,6 +111,7 @@ impl<'host> TypeChecker<'host> {
             current_function: None,
             named_types: HashMap::new(),
             checked_type_definitions: HashSet::new(),
+            enum_types: HashMap::new(),
         }
     }
 
@@ -131,6 +134,7 @@ impl<'host> TypeChecker<'host> {
             .map(|located| located.input.clone())
             .collect::<Vec<_>>();
         self.register_types(&statements);
+        self.register_enums(&statements);
         self.register_functions(&statements);
 
         for located in program {
@@ -190,9 +194,20 @@ impl<'host> TypeChecker<'host> {
 
     fn check_statements(&mut self, statements: &[ParsedInput]) {
         self.register_types(statements);
+        self.register_enums(statements);
         self.register_functions(statements);
         for statement in statements {
             self.check_statement(statement);
+        }
+    }
+
+    fn register_enums(&mut self, statements: &[ParsedInput]) {
+        for statement in statements {
+            if let ParsedInput::EnumDefinition { name, definition } = statement {
+                self.enum_types
+                    .entry(name.clone())
+                    .or_insert_with(|| definition.variants.clone());
+            }
         }
     }
 
@@ -217,6 +232,17 @@ impl<'host> TypeChecker<'host> {
                         )));
                 }
                 for type_name in definition.fields.values() {
+                    self.check_type_exists(type_name);
+                }
+            }
+            ParsedInput::EnumDefinition { name, definition } => {
+                if !self.checked_type_definitions.insert(name.clone()) {
+                    self.diagnostics
+                        .push(TypeDiagnostic::new(TypeDiagnosticKind::AlreadyDefined(
+                            name.clone(),
+                        )));
+                }
+                for type_name in definition.variants.values().flatten() {
                     self.check_type_exists(type_name);
                 }
             }
@@ -249,9 +275,17 @@ impl<'host> TypeChecker<'host> {
             ParsedInput::Match { value, arms } => {
                 let matched = self.infer(value);
                 for arm in arms {
-                    self.check_pattern(&arm.pattern, matched.as_ref());
-                    self.check_block(std::slice::from_ref(&arm.body));
+                    let binding = self.check_pattern(&arm.pattern, matched.as_ref());
+                    self.context.push_scope();
+                    self.unknowns.push(HashSet::new());
+                    if let Some((name, type_name)) = binding {
+                        let _ = self.context.declare(name, type_name);
+                    }
+                    self.check_statement(&arm.body);
+                    self.unknowns.pop();
+                    self.context.pop_scope();
                 }
+                self.check_enum_exhaustive(matched.as_ref(), arms.iter().map(|arm| &arm.pattern));
             }
             ParsedInput::While { condition, body } => {
                 self.expect(condition, TypeName::Bool, TypeDiagnosticKind::Condition);
@@ -612,6 +646,11 @@ impl<'host> TypeChecker<'host> {
             Expression::Construct { type_name, fields } => {
                 self.infer_construction(type_name, fields)
             }
+            Expression::EnumVariant {
+                enum_name,
+                variant,
+                payload,
+            } => self.infer_enum_variant(enum_name, variant, payload.as_deref()),
             Expression::List(values) => self.infer_list(values),
             Expression::Index { target, index } => self.infer_index(target, index),
             Expression::Field { target, name } => self.infer_field(target, name),
@@ -735,9 +774,57 @@ impl<'host> TypeChecker<'host> {
         Some(TypeName::Named(type_name.into()))
     }
 
+    fn infer_enum_variant(
+        &mut self,
+        enum_name: &str,
+        variant: &str,
+        payload: Option<&Expression>,
+    ) -> Option<TypeName> {
+        let Some(variants) = self.enum_types.get(enum_name) else {
+            self.diagnostics
+                .push(TypeDiagnostic::new(TypeDiagnosticKind::UnknownType(
+                    enum_name.into(),
+                )));
+            if let Some(payload) = payload {
+                self.infer(payload);
+            }
+            return None;
+        };
+        let Some(expected) = variants.get(variant).cloned() else {
+            self.diagnostics
+                .push(TypeDiagnostic::new(TypeDiagnosticKind::UnknownEnumVariant(
+                    format!("{enum_name}::{variant}"),
+                )));
+            if let Some(payload) = payload {
+                self.infer(payload);
+            }
+            return None;
+        };
+        match (expected, payload) {
+            (Some(expected), Some(payload)) => self.expect(
+                payload,
+                expected,
+                TypeDiagnosticKind::Declaration(format!("{enum_name}::{variant}")),
+            ),
+            (Some(_), None) => self.diagnostics.push(TypeDiagnostic::new(
+                TypeDiagnosticKind::MissingVariantPayload(format!("{enum_name}::{variant}")),
+            )),
+            (None, Some(payload)) => {
+                self.diagnostics.push(TypeDiagnostic::new(
+                    TypeDiagnosticKind::UnexpectedVariantPayload(format!("{enum_name}::{variant}")),
+                ));
+                self.infer(payload);
+            }
+            (None, None) => {}
+        }
+        Some(TypeName::Named(enum_name.into()))
+    }
+
     fn check_type_exists(&mut self, type_name: &TypeName) {
         match type_name {
-            TypeName::Named(name) if !self.named_types.contains_key(name) => {
+            TypeName::Named(name)
+                if !self.named_types.contains_key(name) && !self.enum_types.contains_key(name) =>
+            {
                 self.diagnostics
                     .push(TypeDiagnostic::new(TypeDiagnosticKind::UnknownType(
                         name.clone(),
@@ -770,8 +857,13 @@ impl<'host> TypeChecker<'host> {
         let mut result: Option<TypeName> = None;
 
         for arm in arms {
-            self.check_pattern(&arm.pattern, matched.as_ref());
+            let binding = self.check_pattern(&arm.pattern, matched.as_ref());
+            self.context.push_scope();
+            if let Some((name, type_name)) = binding {
+                let _ = self.context.declare(name, type_name);
+            }
             let Some(found) = self.infer(&arm.value) else {
+                self.context.pop_scope();
                 continue;
             };
             if let Some(expected) = &result {
@@ -785,11 +877,50 @@ impl<'host> TypeChecker<'host> {
             } else {
                 result = Some(found);
             }
+            self.context.pop_scope();
         }
+        self.check_enum_exhaustive(matched.as_ref(), arms.iter().map(|arm| &arm.pattern));
         result
     }
 
-    fn check_pattern(&mut self, pattern: &MatchPattern, expected: Option<&TypeName>) {
+    fn check_enum_exhaustive<'a>(
+        &mut self,
+        matched: Option<&TypeName>,
+        patterns: impl Iterator<Item = &'a MatchPattern>,
+    ) {
+        let Some(TypeName::Named(enum_name)) = matched else {
+            return;
+        };
+        let Some(variants) = self.enum_types.get(enum_name) else {
+            return;
+        };
+        let mut covered = HashSet::new();
+        let mut wildcard = false;
+        for pattern in patterns {
+            match pattern {
+                MatchPattern::Wildcard => wildcard = true,
+                MatchPattern::EnumVariant {
+                    enum_name: pattern_enum,
+                    variant,
+                    ..
+                } if pattern_enum == enum_name => {
+                    covered.insert(variant.clone());
+                }
+                _ => {}
+            }
+        }
+        if !wildcard && variants.keys().any(|variant| !covered.contains(variant)) {
+            self.diagnostics.push(TypeDiagnostic::new(
+                TypeDiagnosticKind::NonExhaustiveEnumMatch(enum_name.clone()),
+            ));
+        }
+    }
+
+    fn check_pattern(
+        &mut self,
+        pattern: &MatchPattern,
+        expected: Option<&TypeName>,
+    ) -> Option<(String, TypeName)> {
         let found = match pattern {
             MatchPattern::Literal(value) => Some(value.type_name()),
             MatchPattern::Identifier(name) => self.context.resolve(name).cloned().or_else(|| {
@@ -802,6 +933,41 @@ impl<'host> TypeChecker<'host> {
             }),
             MatchPattern::Status => Some(TypeName::Int),
             MatchPattern::Wildcard => None,
+            MatchPattern::EnumVariant {
+                enum_name,
+                variant,
+                binding,
+            } => {
+                let full = format!("{enum_name}::{variant}");
+                let Some(payload) = self
+                    .enum_types
+                    .get(enum_name)
+                    .and_then(|variants| variants.get(variant))
+                    .cloned()
+                else {
+                    self.diagnostics.push(TypeDiagnostic::new(
+                        TypeDiagnosticKind::UnknownEnumVariant(full),
+                    ));
+                    return None;
+                };
+                if !matches!(expected, Some(TypeName::Named(name)) if name == enum_name) {
+                    self.diagnostics.push(TypeDiagnostic::mismatch(
+                        TypeDiagnosticKind::MatchPattern,
+                        expected
+                            .cloned()
+                            .unwrap_or(TypeName::Named(enum_name.clone())),
+                        TypeName::Named(enum_name.clone()),
+                    ));
+                }
+                match (binding, payload) {
+                    (Some(binding), Some(payload)) => return Some((binding.clone(), payload)),
+                    (Some(_), None) => self.diagnostics.push(TypeDiagnostic::new(
+                        TypeDiagnosticKind::UnexpectedVariantPayload(full),
+                    )),
+                    _ => {}
+                }
+                return None;
+            }
         };
         if let (Some(expected), Some(found)) = (expected, found)
             && !expected.accepts(&found)
@@ -812,6 +978,7 @@ impl<'host> TypeChecker<'host> {
                 found,
             ));
         }
+        None
     }
 
     fn infer_binary(
@@ -1604,5 +1771,62 @@ mod tests {
             diagnostic.expected == Some(TypeName::Named("Admin".into()))
                 && diagnostic.found == Some(TypeName::Named("User".into()))
         }));
+    }
+
+    #[test]
+    fn checks_enum_construction_patterns_and_exhaustiveness() {
+        let valid = crate::parser::parse_source(
+            "enum JobState { Running, Done(int) }\n\
+             let state: JobState = JobState::Done(7)\n\
+             let code: int = match state { JobState::Done(value) => value, _ => 0 }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            TypeChecker::check_located_with_host(&valid, &LANGUAGE_HOST_TYPES),
+            Ok(())
+        );
+
+        let invalid = crate::parser::parse_source(
+            "enum JobState { Running, Done(int) }\n\
+             enum PipelinePayload { Empty }\n\
+             let state = JobState::Done(\"bad\")\n\
+             match state {\nPipelinePayload::Empty => print 0\nJobState::Running => print 1\n}\n",
+        )
+        .unwrap();
+        let diagnostics =
+            TypeChecker::check_located_with_host(&invalid, &LANGUAGE_HOST_TYPES).unwrap_err();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.expected == Some(TypeName::Int)
+                    && diagnostic.found == Some(TypeName::String))
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.kind == TypeDiagnosticKind::MatchPattern)
+        );
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic.kind
+            == TypeDiagnosticKind::NonExhaustiveEnumMatch("JobState".into())));
+    }
+
+    #[test]
+    fn rejects_wrong_enum_payload_shapes() {
+        let program = crate::parser::parse_source(
+            "enum State { Ready, Failed(string) }\n\
+             let ready = State::Ready(1)\n\
+             let failed = State::Failed\n",
+        )
+        .unwrap();
+        let diagnostics =
+            TypeChecker::check_located_with_host(&program, &LANGUAGE_HOST_TYPES).unwrap_err();
+        assert!(diagnostics.iter().any(|diagnostic| matches!(
+            diagnostic.kind,
+            TypeDiagnosticKind::UnexpectedVariantPayload(_)
+        )));
+        assert!(diagnostics.iter().any(|diagnostic| matches!(
+            diagnostic.kind,
+            TypeDiagnosticKind::MissingVariantPayload(_)
+        )));
     }
 }

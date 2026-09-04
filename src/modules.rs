@@ -205,7 +205,8 @@ fn qualify_module(program: &mut [LocatedInput], namespace: &str) {
         .filter_map(|located| match &located.input {
             ParsedInput::Let { name, .. }
             | ParsedInput::FunctionDefinition { name, .. }
-            | ParsedInput::TypeDefinition { name, .. } => Some(name.clone()),
+            | ParsedInput::TypeDefinition { name, .. }
+            | ParsedInput::EnumDefinition { name, .. } => Some(name.clone()),
             _ => None,
         })
         .collect::<HashSet<_>>();
@@ -279,6 +280,12 @@ impl NamespaceRewriter {
                     self.type_name(type_name);
                 }
             }
+            ParsedInput::EnumDefinition { name, definition } => {
+                *name = self.qualified(name);
+                for type_name in definition.variants.values_mut().flatten() {
+                    self.type_name(type_name);
+                }
+            }
             ParsedInput::If {
                 branches,
                 else_body,
@@ -294,7 +301,10 @@ impl NamespaceRewriter {
             ParsedInput::Match { value, arms } => {
                 self.expression(value);
                 for arm in arms {
-                    self.block(std::slice::from_mut(&mut arm.body));
+                    self.pattern(&mut arm.pattern);
+                    self.locals.push(pattern_bindings(&arm.pattern));
+                    self.statement(&mut arm.body, false);
+                    self.locals.pop();
                 }
             }
             ParsedInput::While { condition, body } => {
@@ -397,6 +407,16 @@ impl NamespaceRewriter {
                     self.expression(value);
                 }
             }
+            Expression::EnumVariant {
+                enum_name, payload, ..
+            } => {
+                if self.resolves_global(enum_name) {
+                    *enum_name = self.qualified(enum_name);
+                }
+                if let Some(payload) = payload {
+                    self.expression(payload);
+                }
+            }
             Expression::List(values) => {
                 for value in values {
                     self.expression(value);
@@ -415,7 +435,10 @@ impl NamespaceRewriter {
             Expression::Match { value, arms } => {
                 self.expression(value);
                 for arm in arms {
+                    self.pattern(&mut arm.pattern);
+                    self.locals.push(pattern_bindings(&arm.pattern));
                     self.expression(&mut arm.value);
+                    self.locals.pop();
                 }
             }
             Expression::Literal(_) | Expression::EnvironmentVariable(_) | Expression::Status => {}
@@ -430,6 +453,24 @@ impl NamespaceRewriter {
             crab_lang::runtime::TypeName::List(Some(element)) => self.type_name(element),
             _ => {}
         }
+    }
+
+    fn pattern(&self, pattern: &mut crab_lang::parser::MatchPattern) {
+        if let crab_lang::parser::MatchPattern::EnumVariant { enum_name, .. } = pattern
+            && self.resolves_global(enum_name)
+        {
+            *enum_name = self.qualified(enum_name);
+        }
+    }
+}
+
+fn pattern_bindings(pattern: &crab_lang::parser::MatchPattern) -> HashSet<String> {
+    match pattern {
+        crab_lang::parser::MatchPattern::EnumVariant {
+            binding: Some(binding),
+            ..
+        } => HashSet::from([binding.clone()]),
+        _ => HashSet::new(),
     }
 }
 
@@ -555,6 +596,30 @@ mod tests {
         assert!(matches!(
             &program[0].input,
             ParsedInput::TypeDefinition { name, .. } if name == "models::User"
+        ));
+    }
+
+    #[test]
+    fn qualifies_enum_types_variants_and_patterns_inside_modules() {
+        let directory = temp_directory("enum_type");
+        fs::write(
+            directory.join("jobs.crb"),
+            "module jobs\nenum JobState { Running, Done(int) }\nlet value = 99\nfn code(state: JobState) -> int {\nreturn match state { JobState::Done(value) => value, _ => 0 }\n}\n",
+        )
+        .unwrap();
+        let root = directory.join("main.crb");
+        fs::write(
+            &root,
+            "import \"jobs.crb\"\nlet code: int = jobs::code(jobs::JobState::Done(42))\n",
+        )
+        .unwrap();
+
+        let program = load_program(&root).unwrap();
+        fs::remove_dir_all(directory).unwrap();
+
+        assert!(matches!(
+            &program[0].input,
+            ParsedInput::EnumDefinition { name, .. } if name == "jobs::JobState"
         ));
     }
 }

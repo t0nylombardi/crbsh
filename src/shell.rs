@@ -5,7 +5,8 @@ use crate::builtins::registry::BuiltinRegistry;
 use crate::execution::JobManager;
 use crate::history::History;
 use crate::parser::{
-    BinaryOperator, Expression, FunctionDefinition, MatchPattern, ParsedCommand, TypeDefinition,
+    BinaryOperator, EnumDefinition, Expression, FunctionDefinition, MatchPattern, ParsedCommand,
+    TypeDefinition,
 };
 use crate::runtime::{LanguageRuntime, ScopeError, ScopeStack, TypeName, Value};
 
@@ -46,6 +47,9 @@ pub enum ShellError {
     UnknownType(String),
     MissingConstructionField(String),
     UnexpectedConstructionField(String),
+    UnknownEnumVariant(String),
+    MissingVariantPayload(String),
+    UnexpectedVariantPayload(String),
     NonExhaustiveMatch,
 }
 
@@ -173,6 +177,49 @@ impl Shell {
         self.runtime.define_type(name.into(), definition);
     }
 
+    pub fn define_enum(&mut self, name: impl Into<String>, definition: EnumDefinition) {
+        self.runtime.define_enum(name.into(), definition);
+    }
+
+    pub fn construct_enum(
+        &self,
+        enum_name: &str,
+        variant: &str,
+        payload: Option<Value>,
+    ) -> Result<Value, ShellError> {
+        let variants = self
+            .runtime
+            .enum_variants(enum_name)
+            .ok_or_else(|| ShellError::UnknownType(enum_name.into()))?;
+        let expected = variants
+            .get(variant)
+            .ok_or_else(|| ShellError::UnknownEnumVariant(format!("{enum_name}::{variant}")))?;
+        match (expected, payload.as_ref()) {
+            (Some(expected), Some(payload)) if !expected.accepts(&payload.type_name()) => {
+                return Err(ShellError::TypeMismatch {
+                    expected: expected.clone(),
+                    found: payload.type_name(),
+                });
+            }
+            (Some(_), None) => {
+                return Err(ShellError::MissingVariantPayload(format!(
+                    "{enum_name}::{variant}"
+                )));
+            }
+            (None, Some(_)) => {
+                return Err(ShellError::UnexpectedVariantPayload(format!(
+                    "{enum_name}::{variant}"
+                )));
+            }
+            _ => {}
+        }
+        Ok(Value::Enum {
+            enum_name: enum_name.into(),
+            variant: variant.into(),
+            payload: payload.map(Box::new),
+        })
+    }
+
     pub fn construct(
         &self,
         type_name: &str,
@@ -282,6 +329,17 @@ impl Shell {
                 })
                 .collect::<Result<_, _>>()
                 .and_then(|fields| self.construct(type_name, fields)),
+            Expression::EnumVariant {
+                enum_name,
+                variant,
+                payload,
+            } => {
+                let payload = payload
+                    .as_deref()
+                    .map(|payload| self.evaluate(payload))
+                    .transpose()?;
+                self.construct_enum(enum_name, variant, payload)
+            }
             Expression::Index { target, index } => {
                 evaluate_index(self.evaluate(target)?, self.evaluate(index)?)
             }
@@ -298,6 +356,7 @@ impl Shell {
                             .runtime
                             .variable_value(name)
                             .is_some_and(|pattern| pattern == value),
+                        MatchPattern::EnumVariant { enum_name, variant, .. } => matches!(&value, Value::Enum { enum_name: actual_enum, variant: actual_variant, .. } if actual_enum == enum_name && actual_variant == variant),
                     })
                     .ok_or(ShellError::NonExhaustiveMatch)?;
                 self.evaluate(&arm.value)
@@ -438,6 +497,13 @@ impl fmt::Display for ShellError {
             }
             Self::UnexpectedConstructionField(name) => {
                 write!(formatter, "construction has unexpected field '{name}'")
+            }
+            Self::UnknownEnumVariant(name) => write!(formatter, "undefined enum variant '{name}'"),
+            Self::MissingVariantPayload(name) => {
+                write!(formatter, "enum variant '{name}' requires a payload")
+            }
+            Self::UnexpectedVariantPayload(name) => {
+                write!(formatter, "enum variant '{name}' does not accept a payload")
             }
             Self::NonExhaustiveMatch => write!(formatter, "non-exhaustive match expression"),
         }

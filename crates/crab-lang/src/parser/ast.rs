@@ -1,8 +1,8 @@
 use crate::runtime::TypeName;
 
 use super::{
-    Expression, FunctionDefinition, IfBranch, Iterable, MatchArm, Pipeline, PipelineConnector,
-    TypeDefinition,
+    EnumDefinition, Expression, FunctionDefinition, IfBranch, Iterable, MatchArm, Pipeline,
+    PipelineConnector, TypeDefinition,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,6 +16,10 @@ pub enum ParsedInput {
     TypeDefinition {
         name: String,
         definition: TypeDefinition,
+    },
+    EnumDefinition {
+        name: String,
+        definition: EnumDefinition,
     },
     Pipeline(Pipeline),
     PipelineChain {

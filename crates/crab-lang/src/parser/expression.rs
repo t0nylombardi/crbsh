@@ -111,6 +111,25 @@ impl<'a> ExpressionParser<'a> {
         {
             self.position += 1;
             let expression = self.parse_call(name.clone())?;
+            let expression = if let Some((enum_name, variant)) = enum_variant_path(name) {
+                let Expression::Call { mut args, .. } = expression else {
+                    unreachable!()
+                };
+                if args.len() == 1 {
+                    Expression::EnumVariant {
+                        enum_name: enum_name.into(),
+                        variant: variant.into(),
+                        payload: Some(Box::new(args.remove(0))),
+                    }
+                } else {
+                    Expression::Call {
+                        name: name.clone(),
+                        args,
+                    }
+                }
+            } else {
+                expression
+            };
             return self.parse_postfix(expression);
         }
 
@@ -125,6 +144,17 @@ impl<'a> ExpressionParser<'a> {
 
         let expression =
             token_to_expression(token).ok_or_else(|| ParseError::UnexpectedToken(token.clone()))?;
+        let expression = match expression {
+            Expression::Identifier(path) if enum_variant_path(&path).is_some() => {
+                let (enum_name, variant) = enum_variant_path(&path).expect("checked variant path");
+                Expression::EnumVariant {
+                    enum_name: enum_name.into(),
+                    variant: variant.into(),
+                    payload: None,
+                }
+            }
+            expression => expression,
+        };
         self.parse_postfix(expression)
     }
 
@@ -176,6 +206,27 @@ impl<'a> ExpressionParser<'a> {
             }
             Some(Token::IntLiteral(value)) => Ok(MatchPattern::Literal(Value::Int(*value))),
             Some(Token::BoolLiteral(value)) => Ok(MatchPattern::Literal(Value::Bool(*value))),
+            Some(Token::Word(path)) if enum_variant_path(path).is_some() => {
+                let (enum_name, variant) = enum_variant_path(path).expect("checked variant path");
+                let binding = if matches!(self.peek(), Some(Token::LeftParen)) {
+                    self.position += 1;
+                    let Some(Token::Word(binding)) = self.advance() else {
+                        return Err(ParseError::MissingMatchPattern);
+                    };
+                    let binding = binding.clone();
+                    if !matches!(self.advance(), Some(Token::RightParen)) {
+                        return Err(ParseError::MissingMatchPattern);
+                    }
+                    Some(binding)
+                } else {
+                    None
+                };
+                Ok(MatchPattern::EnumVariant {
+                    enum_name: enum_name.into(),
+                    variant: variant.into(),
+                    binding,
+                })
+            }
             Some(token) => Err(ParseError::UnexpectedToken(token.clone())),
             None => Err(ParseError::MissingMatchPattern),
         }
@@ -395,6 +446,14 @@ fn is_field_name(name: &str) -> bool {
     let mut chars = name.chars();
     matches!(chars.next(), Some(ch) if ch == '_' || ch.is_ascii_alphabetic())
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+pub(super) fn enum_variant_path(path: &str) -> Option<(&str, &str)> {
+    let (enum_name, variant) = path.rsplit_once("::")?;
+    let type_name = enum_name.rsplit("::").next()?;
+    (type_name.starts_with(|ch: char| ch.is_ascii_uppercase())
+        && variant.starts_with(|ch: char| ch.is_ascii_uppercase()))
+    .then_some((enum_name, variant))
 }
 
 fn parse_member_target(path: &str) -> Expression {

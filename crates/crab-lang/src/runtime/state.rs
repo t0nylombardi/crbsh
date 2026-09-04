@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
-use crate::parser::{FunctionDefinition, TypeDefinition};
+use crate::parser::{EnumDefinition, FunctionDefinition, TypeDefinition};
 
 use super::{FunctionRegistry, ScopeError, ScopeStack, TypeName, Value};
 
@@ -8,6 +8,7 @@ pub struct LanguageRuntime {
     scopes: ScopeStack,
     functions: FunctionRegistry,
     types: HashMap<String, TypeDefinition>,
+    enums: HashMap<String, EnumDefinition>,
 }
 
 impl Default for LanguageRuntime {
@@ -22,6 +23,7 @@ impl LanguageRuntime {
             scopes: ScopeStack::new(),
             functions: FunctionRegistry::new(),
             types: HashMap::new(),
+            enums: HashMap::new(),
         }
     }
 
@@ -86,6 +88,16 @@ impl LanguageRuntime {
         self.types
             .get(name)
             .map(|definition| definition.fields.clone())
+    }
+
+    pub fn define_enum(&mut self, name: String, definition: EnumDefinition) {
+        self.enums.insert(name, definition);
+    }
+
+    pub fn enum_variants(&self, name: &str) -> Option<BTreeMap<String, Option<TypeName>>> {
+        self.enums
+            .get(name)
+            .map(|definition| definition.variants.clone())
     }
 
     pub fn enter_function_call(&mut self) -> Result<(), usize> {

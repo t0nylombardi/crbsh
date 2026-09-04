@@ -68,6 +68,10 @@ pub enum TypeDiagnosticKind {
     MissingRecordField(String),
     MissingConstructionField(String),
     UnexpectedConstructionField(String),
+    UnknownEnumVariant(String),
+    MissingVariantPayload(String),
+    UnexpectedVariantPayload(String),
+    NonExhaustiveEnumMatch(String),
     LengthTarget,
     MatchPattern,
     MatchArm,
@@ -134,6 +138,18 @@ impl fmt::Display for TypeDiagnostic {
             }
             TypeDiagnosticKind::UnexpectedConstructionField(name) => {
                 write!(formatter, "construction has unexpected field '{name}'")
+            }
+            TypeDiagnosticKind::UnknownEnumVariant(name) => {
+                write!(formatter, "undefined enum variant '{name}'")
+            }
+            TypeDiagnosticKind::MissingVariantPayload(name) => {
+                write!(formatter, "enum variant '{name}' requires a payload")
+            }
+            TypeDiagnosticKind::UnexpectedVariantPayload(name) => {
+                write!(formatter, "enum variant '{name}' does not accept a payload")
+            }
+            TypeDiagnosticKind::NonExhaustiveEnumMatch(name) => {
+                write!(formatter, "non-exhaustive match for enum '{name}'")
             }
             TypeDiagnosticKind::StageArgumentCount {
                 stage,

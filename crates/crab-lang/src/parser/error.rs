@@ -15,6 +15,8 @@ pub enum ParseError {
     InvalidModulePath(String),
     InvalidTypeField(String),
     DuplicateField(String),
+    InvalidEnumVariant(String),
+    DuplicateEnumVariant(String),
     MissingBlockStart,
     MissingAssignmentValue,
     MissingFunctionName,
@@ -55,6 +57,10 @@ impl fmt::Display for ParseError {
             Self::InvalidModulePath(path) => write!(formatter, "invalid module path '{path}'"),
             Self::InvalidTypeField(name) => write!(formatter, "invalid type field '{name}'"),
             Self::DuplicateField(name) => write!(formatter, "duplicate field '{name}'"),
+            Self::InvalidEnumVariant(name) => write!(formatter, "invalid enum variant '{name}'"),
+            Self::DuplicateEnumVariant(name) => {
+                write!(formatter, "duplicate enum variant '{name}'")
+            }
             Self::MissingBlockStart => write!(formatter, "missing block start '{{'"),
             Self::MissingAssignmentValue => write!(formatter, "missing assignment value"),
             Self::MissingFunctionName => write!(formatter, "missing function name"),

@@ -48,6 +48,10 @@ pub(crate) fn execute_input(shell: &mut Shell, parsed_input: ParsedInput) -> Con
             shell.define_type(name, definition);
             shell.exit_code = 0;
         }
+        ParsedInput::EnumDefinition { name, definition } => {
+            shell.define_enum(name, definition);
+            shell.exit_code = 0;
+        }
         ParsedInput::FunctionDefinition { name, definition } => {
             shell.define_function(name, definition);
             shell.exit_code = 0;
@@ -384,6 +388,7 @@ fn raw_builtin_arg(argument: &Expression) -> Result<String, ShellError> {
         }
         Expression::List(_)
         | Expression::Construct { .. }
+        | Expression::EnumVariant { .. }
         | Expression::Index { .. }
         | Expression::Match { .. }
         | Expression::Len(_) => {
@@ -445,7 +450,16 @@ fn execute_match(
 
     for arm in arms {
         if pattern_matches(shell, &value, &arm.pattern) {
-            return execute_input(shell, arm.body);
+            shell.push_scope();
+            if let Some((name, payload)) = pattern_binding(&value, &arm.pattern)
+                && let Err(error) = shell.declare_variable(name, None, payload)
+            {
+                shell.pop_scope();
+                return ControlFlow::Error(error.to_string());
+            }
+            let flow = execute_input(shell, arm.body);
+            shell.pop_scope();
+            return flow;
         }
     }
 
@@ -646,7 +660,30 @@ fn pattern_matches(shell: &Shell, value: &Value, pattern: &parser::MatchPattern)
         parser::MatchPattern::Identifier(name) => shell
             .evaluate(&parser::Expression::Identifier(name.clone()))
             .is_ok_and(|pattern| value == &pattern),
+        parser::MatchPattern::EnumVariant {
+            enum_name, variant, ..
+        } => {
+            matches!(value, Value::Enum { enum_name: actual_enum, variant: actual_variant, .. } if actual_enum == enum_name && actual_variant == variant)
+        }
     }
+}
+
+fn pattern_binding(value: &Value, pattern: &parser::MatchPattern) -> Option<(String, Value)> {
+    let parser::MatchPattern::EnumVariant {
+        binding: Some(binding),
+        ..
+    } = pattern
+    else {
+        return None;
+    };
+    let Value::Enum {
+        payload: Some(payload),
+        ..
+    } = value
+    else {
+        return None;
+    };
+    Some((binding.clone(), payload.as_ref().clone()))
 }
 
 pub(crate) fn evaluate_expression(
@@ -685,6 +722,19 @@ pub(crate) fn evaluate_expression(
             })
             .collect::<Result<_, _>>()
             .and_then(|fields| shell.construct(type_name, fields).map_err(Into::into)),
+        parser::Expression::EnumVariant {
+            enum_name,
+            variant,
+            payload,
+        } => {
+            let payload = payload
+                .as_deref()
+                .map(|payload| evaluate_expression(shell, payload))
+                .transpose()?;
+            shell
+                .construct_enum(enum_name, variant, payload)
+                .map_err(Into::into)
+        }
         parser::Expression::List(expressions) => expressions
             .iter()
             .map(|expression| evaluate_expression(shell, expression))
@@ -706,7 +756,16 @@ pub(crate) fn evaluate_expression(
                 .iter()
                 .find(|arm| pattern_matches(shell, &value, &arm.pattern))
                 .ok_or(ShellError::NonExhaustiveMatch)?;
-            evaluate_expression(shell, &arm.value)
+            shell.push_scope();
+            if let Some((name, payload)) = pattern_binding(&value, &arm.pattern)
+                && let Err(error) = shell.declare_variable(name, None, payload)
+            {
+                shell.pop_scope();
+                return Err(error.into());
+            }
+            let result = evaluate_expression(shell, &arm.value);
+            shell.pop_scope();
+            result
         }
         parser::Expression::Len(target) => {
             let target = evaluate_expression(shell, target)?;
